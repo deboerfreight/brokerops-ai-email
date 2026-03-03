@@ -199,3 +199,48 @@ def compliance_job():
     from app.workflows.compliance_sync import run_for_active_loads
     synced = run_for_active_loads()
     return {"synced_carriers": synced}
+
+
+@app.get("/debug/labels")
+def debug_labels():
+    """Debug: show Gmail labels and search results."""
+    from app.gmail import get_gmail_service, _get_label_id, search_messages
+    from app.sheets import is_message_processed
+    svc = get_gmail_service()
+
+    # List all OPS labels
+    resp = svc.users().labels().list(userId="me").execute()
+    ops_labels = [
+        {"name": lbl["name"], "id": lbl["id"]}
+        for lbl in resp.get("labels", [])
+        if lbl["name"].startswith("OPS/")
+    ]
+
+    # Try to find OPS/NEW_LOAD label
+    label_id = _get_label_id("OPS/NEW_LOAD")
+
+    # Search for messages
+    messages = []
+    processed_status = []
+    if label_id:
+        msg_resp = svc.users().messages().list(
+            userId="me", labelIds=[label_id]
+        ).execute()
+        messages = msg_resp.get("messages", [])
+        for m in messages:
+            processed_status.append({
+                "id": m["id"],
+                "is_processed": is_message_processed(m["id"]),
+            })
+
+    # Get user email
+    profile = svc.users().getProfile(userId="me").execute()
+
+    return {
+        "gmail_account": profile.get("emailAddress"),
+        "ops_labels": ops_labels,
+        "new_load_label_id": label_id,
+        "messages_found": len(messages),
+        "messages": messages,
+        "processed_status": processed_status,
+    }
