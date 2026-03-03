@@ -27,7 +27,10 @@ from app.sheets import (
 )
 from app.drive import ensure_folder, upload_file, upload_text
 from app.parsers import parse_load_email
-from app.ai_parser import parse_with_gemini, check_completeness, build_missing_fields_reply
+from app.ai_parser import (
+    classify_email, parse_with_gemini,
+    check_completeness, build_missing_fields_reply,
+)
 
 logger = logging.getLogger("brokerops.workflows.load_ingestion")
 
@@ -60,7 +63,38 @@ def run() -> list[str]:
 
             logger.info("[%s] Processing new load email from %s: '%s'", msg_id, from_addr, subject)
 
-            # ── Smart parse chain: regex first, then Gemini AI fallback ──
+            # ── Step 1: Classify the email ──
+            classification = classify_email(body, subject, from_addr)
+            category = classification.get("category", "NEW_LOAD")
+            confidence = classification.get("confidence", 0.0)
+
+            if category == "CARRIER_QUOTE":
+                # This is a carrier replying to an RFQ – route to quotes pipeline
+                logger.info("[%s] Classified as CARRIER_QUOTE (%.0f%%) – re-labeling",
+                            msg_id, confidence * 100)
+                add_label(msg_id, "OPS/QUOTES_RECEIVED")
+                remove_label(msg_id, "OPS/NEW_LOAD")
+                mark_message_processed(msg_id, "reclassified:CARRIER_QUOTE")
+                continue
+
+            if category == "OTHER" and confidence > 0.8:
+                # High confidence it's not load-related – block it
+                logger.info("[%s] Classified as OTHER (%.0f%%) – blocking",
+                            msg_id, confidence * 100)
+                add_label(msg_id, "OPS/BLOCKED")
+                remove_label(msg_id, "OPS/NEW_LOAD")
+                mark_message_processed(msg_id, "reclassified:OTHER")
+                continue
+
+            if category == "LOAD_UPDATE":
+                # Follow-up on an existing load – for now, treat as new load
+                # but add a note so ops knows to check for duplicates
+                logger.info("[%s] Classified as LOAD_UPDATE (%.0f%%) – ingesting with note",
+                            msg_id, confidence * 100)
+
+            # Categories NEW_LOAD and LOAD_UPDATE proceed to ingestion
+
+            # ── Step 2: Smart parse chain – regex first, then Gemini AI fallback ──
             fields = parse_load_email(body, subject)
 
             # Count how many key fields the regex parser found

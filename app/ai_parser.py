@@ -1,9 +1,9 @@
 """
-BrokerOps AI – Gemini-based fallback parser for free-form load emails.
+BrokerOps AI – Gemini-based AI helpers.
 
-When the regex parser returns too many empty fields, this module sends the
-email text to Google Gemini (free tier on Vertex AI) and asks it to extract
-structured load data.
+- Email classification: distinguish load requests from carrier replies
+- Fallback parser: extract structured load data from free-form emails
+- Completeness check and auto-reply builder
 """
 from __future__ import annotations
 
@@ -49,27 +49,21 @@ Rules:
 """.format(fields=", ".join(_FIELDS))
 
 
-def parse_with_gemini(email_body: str, subject: str = "") -> dict[str, Any]:
+def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
     """
-    Send the email text to Gemini and return structured fields.
-    Uses Application Default Credentials (the Cloud Run service account).
+    Send a prompt to Gemini via Vertex AI and return the raw text response.
+    Uses Application Default Credentials (works automatically on Cloud Run).
     """
     settings = get_settings()
     project = settings.GCP_PROJECT_ID
     region = settings.GCP_REGION
 
-    # Build the request
-    full_text = f"Subject: {subject}\n\n{email_body}" if subject else email_body
-    prompt = f"{_SYSTEM_PROMPT}\n\nEmail:\n---\n{full_text}\n---\n\nJSON:"
-
-    # Use Vertex AI Gemini endpoint with ADC
     endpoint = (
         f"https://{region}-aiplatform.googleapis.com/v1/"
         f"projects/{project}/locations/{region}/"
         f"publishers/google/models/gemini-2.0-flash:generateContent"
     )
 
-    # Get credentials via ADC (works on Cloud Run automatically)
     credentials, _ = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
@@ -80,43 +74,105 @@ def parse_with_gemini(email_body: str, subject: str = "") -> dict[str, Any]:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": max_tokens,
         },
     }
 
+    resp = httpx.post(
+        endpoint,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {credentials.token}",
+            "Content-Type": "application/json",
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    text = (
+        data.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text", "")
+    )
+
+    # Clean up markdown code fences Gemini sometimes adds
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+    if text.endswith("```"):
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
+# ── Email classification ───────────────────────────────────────────────────
+
+_CLASSIFY_PROMPT = """You are a freight brokerage email classifier.
+
+Classify the email below into exactly ONE of these categories:
+
+1. NEW_LOAD — A customer or dispatcher requesting a new shipment/load/quote.
+   They want us to move freight from A to B. Includes "quote requests" from
+   shippers asking for pricing on a lane.
+
+2. CARRIER_QUOTE — A motor carrier replying to an RFQ (Request for Quote)
+   that we sent them. They are providing their rate/availability to haul a load.
+   Look for references to a Load_ID (format YYYY-####), "RFQ", or the carrier
+   quoting a price in response to our outreach.
+
+3. LOAD_UPDATE — A follow-up to an existing load: updated pickup times,
+   address corrections, added details, weight changes, etc. Look for references
+   to an existing Load_ID or phrases like "update", "correction", "revised".
+
+4. OTHER — Anything else (general inquiries, spam, personal emails, etc.)
+
+Return ONLY a JSON object with these fields:
+- "category": one of "NEW_LOAD", "CARRIER_QUOTE", "LOAD_UPDATE", "OTHER"
+- "confidence": a number 0.0 to 1.0
+- "reason": a brief one-sentence explanation
+
+No markdown, no backticks, just JSON.
+"""
+
+
+def classify_email(body: str, subject: str = "", from_addr: str = "") -> dict[str, Any]:
+    """
+    Classify an inbound email using Gemini.
+    Returns {"category": str, "confidence": float, "reason": str}.
+    """
+    full_text = (
+        f"From: {from_addr}\n"
+        f"Subject: {subject}\n\n"
+        f"{body}"
+    )
+    prompt = f"{_CLASSIFY_PROMPT}\n\nEmail:\n---\n{full_text}\n---\n\nJSON:"
+
     try:
-        resp = httpx.post(
-            endpoint,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {credentials.token}",
-                "Content-Type": "application/json",
-            },
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        text = _call_gemini(prompt, max_tokens=256)
+        result = json.loads(text)
+        logger.info("Email classified as %s (confidence: %s): %s",
+                     result.get("category"), result.get("confidence"), result.get("reason"))
+        return result
+    except Exception as e:
+        logger.error("Email classification failed: %s – defaulting to NEW_LOAD", e)
+        return {"category": "NEW_LOAD", "confidence": 0.0, "reason": "Classification failed, defaulting"}
 
-        # Extract the text response
-        text = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "{}")
-        )
 
-        # Clean up – Gemini sometimes wraps in ```json ... ```
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1]
-        if text.endswith("```"):
-            text = text.rsplit("```", 1)[0]
-        text = text.strip()
+# ── Load data extraction ───────────────────────────────────────────────────
 
+def parse_with_gemini(email_body: str, subject: str = "") -> dict[str, Any]:
+    """
+    Send the email text to Gemini and return structured fields.
+    """
+    full_text = f"Subject: {subject}\n\n{email_body}" if subject else email_body
+    prompt = f"{_SYSTEM_PROMPT}\n\nEmail:\n---\n{full_text}\n---\n\nJSON:"
+
+    try:
+        text = _call_gemini(prompt)
         parsed = json.loads(text)
         logger.info("Gemini parsed %d non-empty fields", sum(1 for v in parsed.values() if v))
         return {k: str(v) if v else "" for k, v in parsed.items() if k in _FIELDS}
-
     except Exception as e:
         logger.error("Gemini parsing failed: %s", e)
         return {}
