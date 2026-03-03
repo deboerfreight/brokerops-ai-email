@@ -201,6 +201,76 @@ def compliance_job():
     return {"synced_carriers": synced}
 
 
+@app.post("/jobs/ingest-test")
+def ingest_test():
+    """Run ONLY load ingestion with verbose output for debugging."""
+    import traceback
+    from app.gmail import search_messages, _get_label_id, _label_cache, get_gmail_service
+    from app.sheets import is_message_processed
+
+    output: dict[str, Any] = {}
+
+    # 1. Check credentials
+    try:
+        svc = get_gmail_service()
+        profile = svc.users().getProfile(userId="me").execute()
+        output["gmail_account"] = profile.get("emailAddress")
+    except Exception as e:
+        output["gmail_auth_error"] = str(e)
+        return JSONResponse(content=output)
+
+    # 2. Check label resolution
+    try:
+        label_id = _get_label_id("OPS/NEW_LOAD")
+        output["label_id"] = label_id
+        output["label_cache_keys"] = list(_label_cache.keys())
+    except Exception as e:
+        output["label_error"] = str(e)
+
+    # 3. Direct API call (like debug endpoint)
+    try:
+        if label_id:
+            msg_resp = svc.users().messages().list(
+                userId="me", labelIds=[label_id]
+            ).execute()
+            direct_msgs = msg_resp.get("messages", [])
+            output["direct_api_count"] = len(direct_msgs)
+            output["direct_api_messages"] = direct_msgs[:5]
+        else:
+            output["direct_api_count"] = "SKIPPED – no label_id"
+    except Exception as e:
+        output["direct_api_error"] = str(e)
+
+    # 4. search_messages call (same as load_ingestion uses)
+    try:
+        sm_results = search_messages("OPS/NEW_LOAD")
+        output["search_messages_count"] = len(sm_results)
+        output["search_messages_results"] = sm_results[:5]
+    except Exception as e:
+        output["search_messages_error"] = str(e)
+        output["search_messages_traceback"] = traceback.format_exc()
+
+    # 5. Check processed status
+    if sm_results:
+        for m in sm_results[:5]:
+            mid = m["id"]
+            try:
+                output[f"is_processed_{mid}"] = is_message_processed(mid)
+            except Exception as e:
+                output[f"processed_check_error_{mid}"] = str(e)
+
+    # 6. Actually run load_ingestion
+    try:
+        from app.workflows.load_ingestion import run as ingest_run
+        created = ingest_run()
+        output["ingestion_result"] = created
+    except Exception as e:
+        output["ingestion_error"] = str(e)
+        output["ingestion_traceback"] = traceback.format_exc()
+
+    return JSONResponse(content=output)
+
+
 @app.get("/debug/labels")
 def debug_labels():
     """Debug: show Gmail labels and search results."""

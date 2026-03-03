@@ -61,9 +61,13 @@ def remove_label(message_id: str, label_name: str) -> None:
 
 def search_messages(label_name: str, query: str = "") -> list[dict]:
     """Return list of message stubs matching a Gmail label + optional query."""
+    logger.info("search_messages called: label_name='%s', query='%s'", label_name, query)
     label_id = _get_label_id(label_name)
     if not label_id:
+        logger.warning("Label '%s' not found – returning empty list. Cache keys: %s",
+                        label_name, list(_label_cache.keys()))
         return []
+    logger.info("Resolved label '%s' → id '%s'", label_name, label_id)
     svc = get_gmail_service()
     results: list[dict] = []
     page_token = None
@@ -71,10 +75,14 @@ def search_messages(label_name: str, query: str = "") -> list[dict]:
         resp = svc.users().messages().list(
             userId="me", labelIds=[label_id], q=query, pageToken=page_token
         ).execute()
-        results.extend(resp.get("messages", []))
+        batch = resp.get("messages", [])
+        logger.info("messages.list returned %d message(s) (resultSizeEstimate=%s)",
+                     len(batch), resp.get("resultSizeEstimate"))
+        results.extend(batch)
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
+    logger.info("search_messages total: %d message(s) for label '%s'", len(results), label_name)
     return results
 
 
