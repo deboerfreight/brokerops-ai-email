@@ -35,7 +35,11 @@ def run() -> list[str]:
     settings = get_settings()
     created: list[str] = []
 
-    messages = search_messages("OPS/NEW_LOAD")
+    try:
+        messages = search_messages("OPS/NEW_LOAD")
+    except Exception as e:
+        logger.error("search_messages failed: %s", e)
+        messages = []
     logger.info("Found %d message(s) with OPS/NEW_LOAD label.", len(messages))
 
     for stub in messages:
