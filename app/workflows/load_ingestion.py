@@ -98,7 +98,11 @@ def run() -> list[str]:
             created.append(load_id)
             logger.info("[%s] Load %s created successfully.", msg_id, load_id)
 
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to process message %s", msg_id)
+            # Store error for diagnostics (accessible via ingest-test endpoint)
+            if not hasattr(run, "_last_errors"):
+                run._last_errors = []
+            run._last_errors.append({"msg_id": msg_id, "error": str(exc)})
 
     return created

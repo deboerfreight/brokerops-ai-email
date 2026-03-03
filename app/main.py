@@ -262,8 +262,14 @@ def ingest_test():
     # 6. Actually run load_ingestion
     try:
         from app.workflows.load_ingestion import run as ingest_run
+        # Clear any previous error state
+        if hasattr(ingest_run, "_last_errors"):
+            ingest_run._last_errors = []
         created = ingest_run()
         output["ingestion_result"] = created
+        # Capture internal errors that run() caught silently
+        if hasattr(ingest_run, "_last_errors") and ingest_run._last_errors:
+            output["ingestion_internal_errors"] = ingest_run._last_errors
     except Exception as e:
         output["ingestion_error"] = str(e)
         output["ingestion_traceback"] = traceback.format_exc()
