@@ -34,11 +34,17 @@ def write_range(sheet_id: str, range_: str, values: list[list], value_input: str
 
 
 def append_row(sheet_id: str, range_: str, row: list, value_input: str = "USER_ENTERED"):
-    _svc().values().append(
+    # Find the actual last row with data to avoid appending far below
+    existing = _svc().values().get(spreadsheetId=sheet_id, range=range_).execute()
+    existing_rows = existing.get("values", [])
+    next_row = len(existing_rows) + 1
+    # Extract tab name from range (e.g., "Loads!A:Z" -> "Loads")
+    tab = range_.split("!")[0] if "!" in range_ else "Sheet1"
+    target = f"{tab}!A{next_row}"
+    _svc().values().update(
         spreadsheetId=sheet_id,
-        range=range_,
+        range=target,
         valueInputOption=value_input,
-        insertDataOption="INSERT_ROWS",
         body={"values": [row]},
     ).execute()
 
