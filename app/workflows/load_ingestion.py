@@ -18,7 +18,8 @@ from datetime import date
 from app.config import get_settings
 from app.gmail import (
     search_messages, get_message, get_body_text, get_header,
-    get_attachments, add_label, remove_label,
+    get_attachments, add_label, remove_label, send_email,
+    reply_to_thread,
 )
 from app.sheets import (
     get_next_load_id, insert_load,
@@ -26,6 +27,7 @@ from app.sheets import (
 )
 from app.drive import ensure_folder, upload_file, upload_text
 from app.parsers import parse_load_email
+from app.ai_parser import parse_with_gemini, check_completeness, build_missing_fields_reply
 
 logger = logging.getLogger("brokerops.workflows.load_ingestion")
 
@@ -58,8 +60,26 @@ def run() -> list[str]:
 
             logger.info("[%s] Processing new load email from %s: '%s'", msg_id, from_addr, subject)
 
-            # Parse
+            # ── Smart parse chain: regex first, then Gemini AI fallback ──
             fields = parse_load_email(body, subject)
+
+            # Count how many key fields the regex parser found
+            key_fields = ["Origin_City", "Destination_City", "Pickup_Date",
+                          "Equipment_Type", "Commodity", "Weight_Lbs"]
+            filled = sum(1 for f in key_fields if fields.get(f))
+            logger.info("[%s] Regex parser filled %d/%d key fields", msg_id, filled, len(key_fields))
+
+            # If regex got fewer than half the key fields, use Gemini
+            if filled < len(key_fields) // 2:
+                logger.info("[%s] Falling back to Gemini AI parser", msg_id)
+                ai_fields = parse_with_gemini(body, subject)
+                # Merge: AI fills in blanks, regex values take priority
+                for k, v in ai_fields.items():
+                    if not fields.get(k) and v:
+                        fields[k] = v
+                filled_after = sum(1 for f in key_fields if fields.get(f))
+                logger.info("[%s] After Gemini: %d/%d key fields filled", msg_id, filled_after, len(key_fields))
+
             load_id = get_next_load_id()
 
             # Fill in system fields
@@ -89,6 +109,40 @@ def run() -> list[str]:
             attachments = get_attachments(msg_id, msg)
             for att in attachments:
                 upload_file(att["filename"], att["data"], att["mime_type"], load_folder_id)
+
+            # ── Check completeness and auto-reply if needed ──
+            completeness = check_completeness(fields)
+            missing_req = completeness["missing_required"]
+            missing_pref = completeness["missing_preferred"]
+
+            if missing_req:
+                # Critical fields missing – create load but mark as INCOMPLETE
+                fields["Load_Status"] = "INCOMPLETE"
+                fields["Internal_Notes"] = (
+                    f"Ingested from Gmail msg {msg_id}. "
+                    f"MISSING REQUIRED: {', '.join(missing_req)}"
+                )
+                logger.warning("[%s] Load %s missing required fields: %s",
+                               msg_id, load_id, missing_req)
+
+                # Auto-reply asking for missing info
+                reply_body = build_missing_fields_reply(missing_req, missing_pref, load_id)
+                try:
+                    reply_to_thread(
+                        thread_id=thread_id,
+                        to=from_addr,
+                        subject=subject,
+                        body_text=reply_body,
+                    )
+                    logger.info("[%s] Sent auto-reply requesting missing fields", msg_id)
+                except Exception as reply_err:
+                    logger.error("[%s] Failed to send auto-reply: %s", msg_id, reply_err)
+
+                # Label as BLOCKED until info arrives
+                add_label(msg_id, "OPS/BLOCKED")
+            elif missing_pref:
+                logger.info("[%s] Load %s missing preferred fields: %s (proceeding anyway)",
+                            msg_id, load_id, missing_pref)
 
             # Swap labels
             remove_label(msg_id, "OPS/NEW_LOAD")
