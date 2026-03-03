@@ -40,6 +40,10 @@ def append_row(sheet_id: str, range_: str, row: list, value_input: str = "USER_E
     next_row = len(existing_rows) + 1
     # Extract tab name from range (e.g., "Loads!A:Z" -> "Loads")
     tab = range_.split("!")[0] if "!" in range_ else "Sheet1"
+
+    # Auto-expand grid if the tab doesn't have enough rows
+    _ensure_grid_rows(sheet_id, tab, next_row)
+
     target = f"{tab}!A{next_row}"
     _svc().values().update(
         spreadsheetId=sheet_id,
@@ -47,6 +51,31 @@ def append_row(sheet_id: str, range_: str, row: list, value_input: str = "USER_E
         valueInputOption=value_input,
         body={"values": [row]},
     ).execute()
+
+
+def _ensure_grid_rows(sheet_id: str, tab_name: str, needed_row: int):
+    """If the tab has fewer rows than needed, expand it automatically."""
+    try:
+        meta = _svc().get(spreadsheetId=sheet_id).execute()
+        for sheet in meta.get("sheets", []):
+            if sheet["properties"]["title"] == tab_name:
+                current_rows = sheet["properties"]["gridProperties"]["rowCount"]
+                if current_rows < needed_row:
+                    rows_to_add = max(needed_row - current_rows, 100)
+                    _svc().batchUpdate(spreadsheetId=sheet_id, body={
+                        "requests": [{
+                            "appendDimension": {
+                                "sheetId": sheet["properties"]["sheetId"],
+                                "dimension": "ROWS",
+                                "length": rows_to_add,
+                            }
+                        }]
+                    }).execute()
+                    logger.info("Expanded '%s' grid by %d rows (was %d, needed %d)",
+                                tab_name, rows_to_add, current_rows, needed_row)
+                return
+    except Exception as e:
+        logger.warning("Could not check/expand grid for '%s': %s", tab_name, e)
 
 
 # ── Load_Master Settings tab ────────────────────────────────────────────────
