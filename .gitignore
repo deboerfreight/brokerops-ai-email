@@ -13,4 +13,6 @@ build/
 credentials.json
 token.json
 *.pickle
+*oauth*.json
+client_secret*.json
 .DS_Store

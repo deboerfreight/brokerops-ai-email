@@ -4,7 +4,7 @@ BrokerOps AI – FastAPI application.
 Endpoints:
   GET  /health              – Health check
   GET  /oauth/start         – Start OAuth2 flow
-  GET  /oauth/callback      – OAuth2 callback
+  GET  /oauth2callback      – OAuth2 callback
   POST /jobs/poll           – Main polling job (called by Cloud Scheduler)
   POST /jobs/compliance     – Run compliance sync for active-load carriers
 """
