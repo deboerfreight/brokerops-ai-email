@@ -110,8 +110,8 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
         },
     }
 
-    models = ["gemini-2.0-flash", "gemini-1.5-flash"]
-    last_error = None
+    models = ["gemini-2.5-flash", "gemini-2.5-pro"]
+    errors = []
 
     for model in models:
         endpoint = (
@@ -129,7 +129,7 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
             if resp.status_code != 200:
                 error_body = resp.text[:500]
                 logger.warning("Gemini model '%s' returned %d: %s", model, resp.status_code, error_body)
-                last_error = f"{model}: {resp.status_code} - {error_body}"
+                errors.append(f"{model}: {resp.status_code} - {error_body}")
                 continue
 
             data = resp.json()
@@ -152,10 +152,10 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
 
         except Exception as e:
             logger.warning("Gemini model '%s' failed: %s", model, e)
-            last_error = f"{model}: {str(e)}"
+            errors.append(f"{model}: {str(e)}")
             continue
 
-    raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+    raise RuntimeError(f"All Gemini models failed. Errors: {'; '.join(errors)}")
 
 
 # ── Email classification ───────────────────────────────────────────────────
