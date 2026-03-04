@@ -23,7 +23,7 @@ _FIELDS = [
     "Destination_City", "Destination_State", "Destination_Zip",
     "Pickup_Date", "Pickup_Time_Window", "Delivery_Date", "Delivery_Time_Window",
     "Equipment_Type", "Commodity", "Weight_Lbs",
-    "Temp_Control_Required", "Hazmat", "Target_Buy_Rate",
+    "Temp_Control_Required", "Hazmat", "Special_Requirements", "Target_Buy_Rate",
 ]
 
 _SYSTEM_PROMPT = """You are a freight brokerage data extraction assistant for De Boer Freight.
@@ -39,8 +39,18 @@ DATE & TIME RULES:
 - "Tomorrow" = the day after today. "Next Monday" = the upcoming Monday.
 - "ASAP" or "today" = today's date.
 - For time windows, use HH:MM-HH:MM 24h format, or "OPEN" if not specified.
-- "8 AM" with no end time = use "08:00-17:00" as a reasonable window.
-- "morning" = "06:00-12:00", "afternoon" = "12:00-18:00".
+- Interpret cutoff language into proper windows:
+  - "at the latest 10am" or "no later than 10" or "must arrive by 10am" → end of window is 10:00
+  - "opens at 8" or "no earlier than 8am" or "available starting 8" → start of window is 08:00
+  - "between 8 and 10am" → "08:00-10:00"
+  - "Theatre opens at 8. Driver can arrive at the latest 10am" → "08:00-10:00"
+  - "must deliver by 3pm" → "06:00-15:00"
+  - "deliver before noon" → "06:00-12:00"
+  - "after 2pm" → "14:00-18:00"
+- If only one time is given with no context: "8 AM" → "08:00-17:00"
+- General terms: "morning" = "06:00-12:00", "afternoon" = "12:00-18:00",
+  "first thing" = "06:00-09:00", "end of day" or "EOD" = "15:00-18:00"
+- "FCFS" (first come first served) or "flexible" = "OPEN"
 
 EQUIPMENT INFERENCE RULES (this is critical for freight):
 - Use one of: DRY_VAN, FLATBED, REEFER, CONESTOGA, BOX_TRUCK, SPRINTER, HOTSHOT
@@ -69,6 +79,23 @@ CUSTOMER NAME:
 - "This is Derek with Atlantic Seafood" → Customer_Name = "Atlantic Seafood"
 - "John from XYZ Logistics" → Customer_Name = "XYZ Logistics"
 - Use the company name, not the person's name.
+
+SPECIAL REQUIREMENTS (comma-separated list, or empty string if none):
+Look for any of these and include ALL that apply:
+- Equipment accessories: lift gate, pallet jack, dolly, tarps, straps, chains,
+  coil racks, load bars, blanket wrap, edge protectors
+- Handling: team drivers, white glove, inside delivery, inside pickup,
+  residential delivery, limited access, appointment required, driver assist,
+  no-touch freight, drop trailer
+- Load specifics: oversize permit, overweight permit, escort required,
+  TWIC card required, pilot car needed
+- Commodity-specific: "tarp required" for exposed flatbed loads (steel, lumber, etc.),
+  "temperature monitoring" for reefer loads
+- Infer when appropriate: "lift gate" if loading/unloading at a location without a dock
+  (theaters, residences, retail stores), "pallet jack" if mentioned, "tarp" if flatbed
+  with weather-sensitive cargo
+- Example: "lift gate, pallet jack, inside delivery"
+- If nothing special mentioned, use empty string ""
 
 GENERAL:
 - Be aggressive about extracting data. This is a freight brokerage inbox — assume
@@ -250,15 +277,25 @@ def parse_with_gemini(email_body: str, subject: str = "") -> dict[str, Any]:
     """
     Send the email text to Gemini and return structured fields.
     """
-    from datetime import date
+    from datetime import date, timedelta
     today = date.today()
     today_str = today.strftime("%Y-%m-%d")
     day_of_week = today.strftime("%A")
 
+    # Build a reference calendar so Gemini doesn't miscalculate days
+    date_ref_lines = [f"Today: {day_of_week} {today_str}"]
+    for i in range(1, 8):
+        d = today + timedelta(days=i)
+        label = "Tomorrow" if i == 1 else d.strftime("%A")
+        date_ref_lines.append(f"{label}: {d.strftime('%A')} {d.strftime('%Y-%m-%d')}")
+
+    date_reference = "\n".join(date_ref_lines)
+
     full_text = f"Subject: {subject}\n\n{email_body}" if subject else email_body
     prompt = (
         f"{_SYSTEM_PROMPT}\n\n"
-        f"TODAY'S DATE: {today_str} ({day_of_week})\n\n"
+        f"DATE REFERENCE (use these exact dates — do NOT calculate yourself):\n"
+        f"{date_reference}\n\n"
         f"Email:\n---\n{full_text}\n---\n\n"
         f"Extract all load details from this email. Return ONLY a JSON object with "
         f"the field names listed above. Every value must be a string. Do not return "
