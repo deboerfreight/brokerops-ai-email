@@ -30,6 +30,7 @@ from app.parsers import parse_load_email
 from app.ai_parser import (
     classify_email, parse_with_gemini,
     check_completeness, build_missing_fields_reply,
+    build_verification_reply, build_confirmation_reply,
 )
 from app.equipment import recommend_equipment
 
@@ -180,14 +181,30 @@ def run() -> list[str]:
                 "Internal_Notes": internal_note,
             })
 
-            # ── Step 3b: Request packing slip if verification needed ──
-            if equip_rec["requires_verification"]:
+            # ── Step 3b: Flag loads needing verification ──
+            needs_verification = equip_rec["requires_verification"]
+            if needs_verification:
                 fields["Load_Status"] = "VERIFY"
                 verification_note = "NEEDS VERIFICATION: " + "; ".join(equip_rec["verification_reasons"])
                 fields["Internal_Notes"] = verification_note + " | " + internal_note
                 logger.info("[%s] Load needs verification: %s", msg_id, equip_rec["verification_reasons"])
 
-            # Insert into Load_Master
+            # ── Check completeness BEFORE inserting ──
+            completeness = check_completeness(fields)
+            missing_req = completeness["missing_required"]
+            missing_pref = completeness["missing_preferred"]
+
+            if missing_req:
+                # Critical fields missing – mark as INCOMPLETE before insert
+                fields["Load_Status"] = "INCOMPLETE"
+                fields["Internal_Notes"] = (
+                    f"Ingested from Gmail msg {msg_id}. "
+                    f"MISSING REQUIRED: {', '.join(missing_req)}"
+                )
+                logger.warning("[%s] Load %s missing required fields: %s",
+                               msg_id, load_id, missing_req)
+
+            # Insert into Load_Master (with correct status)
             insert_load(fields)
 
             # Create Drive folder
@@ -201,37 +218,57 @@ def run() -> list[str]:
             for att in attachments:
                 upload_file(att["filename"], att["data"], att["mime_type"], load_folder_id)
 
-            # ── Check completeness and auto-reply if needed ──
-            completeness = check_completeness(fields)
-            missing_req = completeness["missing_required"]
-            missing_pref = completeness["missing_preferred"]
-
+            # ── Sasha auto-replies ──
             if missing_req:
-                # Critical fields missing – create load but mark as INCOMPLETE
-                fields["Load_Status"] = "INCOMPLETE"
-                fields["Internal_Notes"] = (
-                    f"Ingested from Gmail msg {msg_id}. "
-                    f"MISSING REQUIRED: {', '.join(missing_req)}"
-                )
-                logger.warning("[%s] Load %s missing required fields: %s",
-                               msg_id, load_id, missing_req)
 
-                # Auto-reply disabled for now
-                # reply_body = build_missing_fields_reply(missing_req, missing_pref, load_id)
-                # try:
-                #     reply_to_thread(
-                #         thread_id=thread_id,
-                #         to=from_addr,
-                #         subject=subject,
-                #         body_text=reply_body,
-                #     )
-                #     logger.info("[%s] Sent auto-reply requesting missing fields", msg_id)
-                # except Exception as reply_err:
-                #     logger.error("[%s] Failed to send auto-reply: %s", msg_id, reply_err)
+                # Sasha auto-reply: request missing info
+                reply_body = build_missing_fields_reply(missing_req, missing_pref, load_id)
+                try:
+                    reply_to_thread(
+                        thread_id=thread_id,
+                        to=from_addr,
+                        subject=subject,
+                        body_text=reply_body,
+                    )
+                    logger.info("[%s] Sasha sent missing-fields reply for %s", msg_id, load_id)
+                except Exception as reply_err:
+                    logger.error("[%s] Failed to send missing-fields reply: %s", msg_id, reply_err)
 
                 # Label as BLOCKED until info arrives
                 add_label(msg_id, "OPS/BLOCKED")
-            elif missing_pref:
+
+            elif needs_verification:
+                # Load is complete but equipment needs verification – ask for packing slip
+                reply_body = build_verification_reply(
+                    load_id, equip_rec["verification_reasons"],
+                    equip_rec.get("recommended", ""),
+                )
+                try:
+                    reply_to_thread(
+                        thread_id=thread_id,
+                        to=from_addr,
+                        subject=subject,
+                        body_text=reply_body,
+                    )
+                    logger.info("[%s] Sasha sent verification request for %s", msg_id, load_id)
+                except Exception as reply_err:
+                    logger.error("[%s] Failed to send verification reply: %s", msg_id, reply_err)
+
+            else:
+                # Load is complete – send confirmation
+                try:
+                    reply_body = build_confirmation_reply(load_id, fields)
+                    reply_to_thread(
+                        thread_id=thread_id,
+                        to=from_addr,
+                        subject=subject,
+                        body_text=reply_body,
+                    )
+                    logger.info("[%s] Sasha sent confirmation for %s", msg_id, load_id)
+                except Exception as reply_err:
+                    logger.error("[%s] Failed to send confirmation reply: %s", msg_id, reply_err)
+
+            if missing_pref and not missing_req:
                 logger.info("[%s] Load %s missing preferred fields: %s (proceeding anyway)",
                             msg_id, load_id, missing_pref)
 

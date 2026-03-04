@@ -431,46 +431,92 @@ def build_missing_fields_reply(
     missing_preferred: list[str],
     load_id: str,
 ) -> str:
-    """Build a friendly auto-reply asking the dispatcher for missing info."""
+    """Build an auto-reply in Sasha's voice – brief, direct, friendly."""
 
     # Human-friendly field names
     friendly = {
-        "Origin_City": "origin city",
-        "Origin_State": "origin state",
-        "Destination_City": "destination city",
-        "Destination_State": "destination state",
+        "Origin_City": "pickup city",
+        "Origin_State": "pickup state",
+        "Destination_City": "delivery city",
+        "Destination_State": "delivery state",
         "Pickup_Date": "pickup date",
-        "Equipment_Type": "equipment/trailer type",
-        "Customer_Email": "customer email address",
-        "Commodity": "commodity description",
-        "Weight_Lbs": "weight (lbs)",
-        "Target_Buy_Rate": "target rate/budget",
-        "Origin_Zip": "origin zip code",
-        "Destination_Zip": "destination zip code",
+        "Equipment_Type": "trailer type needed",
+        "Customer_Email": "your email",
+        "Commodity": "what's being shipped",
+        "Weight_Lbs": "total weight",
+        "Target_Buy_Rate": "your budget/target rate",
+        "Origin_Zip": "pickup zip",
+        "Destination_Zip": "delivery zip",
         "Delivery_Date": "delivery date",
     }
 
-    lines = [
-        f"Hi,\n",
-        f"Thanks for submitting load {load_id}. We're working on getting carriers lined up, "
-        f"but we need a few more details to proceed:\n",
-    ]
+    lines = [f"Hey! Sasha here from deBoer Freight. Got your load ({load_id}) in the system.\n"]
 
     if missing_required:
-        lines.append("**Required to move forward:**")
+        lines.append("Need a few things before I can get trucks rolling:\n")
         for f in missing_required:
-            lines.append(f"  - {friendly.get(f, f)}")
+            lines.append(f"  • {friendly.get(f, f)}")
         lines.append("")
 
     if missing_preferred:
-        lines.append("Helpful if you have it:")
+        lines.append("Also helpful if you have it:\n")
         for f in missing_preferred:
-            lines.append(f"  - {friendly.get(f, f)}")
+            lines.append(f"  • {friendly.get(f, f)}")
+        lines.append("")
+
+    lines.append("Just reply here with the details and I'll get this moving.\n")
+    lines.append("– Sasha, Sales Associate @ deBoer Freight")
+
+    return "\n".join(lines)
+
+
+def build_verification_reply(
+    load_id: str,
+    verification_reasons: list[str],
+    equipment_rec: str,
+) -> str:
+    """Build a Sasha-voice reply requesting packing slip / verification."""
+
+    lines = [f"Hey! Sasha here from deBoer Freight – your load ({load_id}) is in the system.\n"]
+
+    lines.append(
+        "I want to make sure we get the right trailer on this so there are no surprises. "
+        "Could you send over a packing slip or BOL so I can verify the specs?\n"
+    )
+
+    if verification_reasons:
+        lines.append("Here's what I'm double-checking:\n")
+        for reason in verification_reasons:
+            lines.append(f"  • {reason}")
         lines.append("")
 
     lines.append(
-        "Just reply to this email with the missing info and we'll get it updated right away.\n\n"
-        "Thanks,\nBrokerOps AI"
+        "Also, any special requirements for this load? Think: lift gate, tarps, "
+        "temp settings, inside delivery, anything like that.\n"
     )
+
+    lines.append("Just reply here with the docs/details and I'll lock in the best option.\n")
+    lines.append("– Sasha, Sales Associate @ deBoer Freight")
+
+    return "\n".join(lines)
+
+
+def build_confirmation_reply(load_id: str, fields: dict) -> str:
+    """Build a Sasha-voice confirmation when load is fully ingested."""
+
+    origin = f"{fields.get('Origin_City', '?')}, {fields.get('Origin_State', '?')}"
+    dest = f"{fields.get('Destination_City', '?')}, {fields.get('Destination_State', '?')}"
+    pickup = fields.get("Pickup_Date", "TBD")
+    equip = fields.get("Equipment_Type", "TBD")
+    commodity = fields.get("Commodity", "freight")
+
+    lines = [
+        f"Hey! Sasha here from deBoer Freight – got your load ({load_id}) locked in.\n",
+        f"Quick summary:",
+        f"  {commodity} • {origin} → {dest}",
+        f"  Pickup: {pickup} • Trailer: {equip}\n",
+        "I'm sourcing carriers now. I'll reach out if anything comes up.\n",
+        "– Sasha, Sales Associate @ deBoer Freight",
+    ]
 
     return "\n".join(lines)
