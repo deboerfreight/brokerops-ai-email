@@ -94,6 +94,16 @@ def poll_job():
     report: dict[str, Any] = {}
 
     try:
+        # 0. Inbox scanner – auto-label new emails before ingestion
+        from app.workflows.inbox_scanner import run as scanner_run
+        auto_labeled = scanner_run()
+        report["auto_labeled"] = auto_labeled
+        logger.info("Auto-labeled %d inbox message(s).", len(auto_labeled))
+    except Exception:
+        logger.exception("Inbox scanner failed")
+        report["inbox_scanner_error"] = True
+
+    try:
         # 1. Load ingestion
         from app.workflows.load_ingestion import run as ingest_run
         new_loads = ingest_run()
