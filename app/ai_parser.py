@@ -158,6 +158,21 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
     raise RuntimeError(f"All Gemini models failed. Errors: {'; '.join(errors)}")
 
 
+def _extract_json(text: str) -> dict:
+    """Extract JSON from a Gemini response that may contain extra text."""
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Find JSON object in the text
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        return json.loads(text[start:end])
+    raise ValueError(f"No valid JSON found in response: {text[:200]}")
+
+
 # ── Email classification ───────────────────────────────────────────────────
 
 _CLASSIFY_PROMPT = """You are a freight brokerage email classifier for De Boer Freight.
@@ -219,7 +234,8 @@ def classify_email(body: str, subject: str = "", from_addr: str = "") -> dict[st
 
     try:
         text = _call_gemini(prompt, max_tokens=256)
-        result = json.loads(text)
+        logger.info("Classification raw response: %s", text[:300])
+        result = _extract_json(text)
         logger.info("Email classified as %s (confidence: %s): %s",
                      result.get("category"), result.get("confidence"), result.get("reason"))
         return result
