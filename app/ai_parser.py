@@ -82,20 +82,9 @@ GENERAL:
 
 def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
     """
-    Send a prompt to Gemini via Vertex AI and return the raw text response.
+    Send a prompt to Gemini via the Generative Language API.
     Uses Application Default Credentials (works automatically on Cloud Run).
     """
-    settings = get_settings()
-    project = settings.GCP_PROJECT_ID
-    region = settings.GCP_REGION
-
-    # Try multiple model names in case one isn't available
-    models = [
-        "gemini-1.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-pro",
-    ]
-
     credentials, _ = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
@@ -110,12 +99,14 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
         },
     }
 
+    # Use the Generative Language API (simpler than Vertex AI)
+    models = ["gemini-2.0-flash", "gemini-1.5-flash"]
     last_error = None
+
     for model in models:
         endpoint = (
-            f"https://{region}-aiplatform.googleapis.com/v1/"
-            f"projects/{project}/locations/{region}/"
-            f"publishers/google/models/{model}:generateContent"
+            f"https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{model}:generateContent"
         )
 
         try:
