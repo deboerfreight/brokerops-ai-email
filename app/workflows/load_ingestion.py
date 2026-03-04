@@ -168,18 +168,18 @@ def run() -> list[str]:
                 logger.warning("[%s] Load %s missing required fields: %s",
                                msg_id, load_id, missing_req)
 
-                # Auto-reply asking for missing info
-                reply_body = build_missing_fields_reply(missing_req, missing_pref, load_id)
-                try:
-                    reply_to_thread(
-                        thread_id=thread_id,
-                        to=from_addr,
-                        subject=subject,
-                        body_text=reply_body,
-                    )
-                    logger.info("[%s] Sent auto-reply requesting missing fields", msg_id)
-                except Exception as reply_err:
-                    logger.error("[%s] Failed to send auto-reply: %s", msg_id, reply_err)
+                # Auto-reply disabled for now
+                # reply_body = build_missing_fields_reply(missing_req, missing_pref, load_id)
+                # try:
+                #     reply_to_thread(
+                #         thread_id=thread_id,
+                #         to=from_addr,
+                #         subject=subject,
+                #         body_text=reply_body,
+                #     )
+                #     logger.info("[%s] Sent auto-reply requesting missing fields", msg_id)
+                # except Exception as reply_err:
+                #     logger.error("[%s] Failed to send auto-reply: %s", msg_id, reply_err)
 
                 # Label as BLOCKED until info arrives
                 add_label(msg_id, "OPS/BLOCKED")
