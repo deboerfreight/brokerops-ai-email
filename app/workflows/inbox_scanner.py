@@ -83,6 +83,31 @@ def run() -> list[str]:
             elif h["name"] == "From":
                 from_addr = h["value"]
 
+        # Skip known non-freight senders and subjects
+        from_lower = from_addr.lower()
+        subject_lower = subject.lower()
+
+        # Skip automated/system emails
+        skip_senders = [
+            "noreply@", "no-reply@", "notifications@", "mailer-daemon@",
+            "postmaster@", "github.com", "google.com", "googlemail.com",
+            "calendar-notification", "drive-shares-noreply",
+            "ads-noreply@", "marketing@", "newsletter@", "support@google",
+        ]
+        if any(skip in from_lower for skip in skip_senders):
+            logger.debug("Skipping system/automated email %s from %s", msg_id, from_addr)
+            continue
+
+        # Skip bounce-back / delivery failure emails
+        skip_subjects = [
+            "delivery status notification", "undeliverable",
+            "mail delivery failed", "returned mail",
+            "out of office", "automatic reply", "auto-reply",
+        ]
+        if any(skip in subject_lower for skip in skip_subjects):
+            logger.debug("Skipping bounce/auto-reply %s: '%s'", msg_id, subject)
+            continue
+
         logger.info("Auto-labeling message %s from %s: '%s'", msg_id, from_addr, subject)
         add_label(msg_id, "OPS/NEW_LOAD")
         labeled.append(msg_id)
