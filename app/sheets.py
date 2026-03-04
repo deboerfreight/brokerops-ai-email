@@ -115,6 +115,8 @@ LOAD_MASTER_COLUMNS = [
     "Equipment_Type", "Commodity", "Weight_Lbs",
     "Temp_Control_Required", "Hazmat",
     "Special_Requirements",
+    "Pickup_Business", "Delivery_Business",
+    "Pickup_Contact", "Delivery_Contact",
     "Target_Buy_Rate", "Customer_Rate",
     "Assigned_Carrier_MC",
     "Load_Status", "Approval_Status",

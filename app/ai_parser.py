@@ -23,7 +23,9 @@ _FIELDS = [
     "Destination_City", "Destination_State", "Destination_Zip",
     "Pickup_Date", "Pickup_Time_Window", "Delivery_Date", "Delivery_Time_Window",
     "Equipment_Type", "Commodity", "Weight_Lbs",
-    "Temp_Control_Required", "Hazmat", "Special_Requirements", "Target_Buy_Rate",
+    "Temp_Control_Required", "Hazmat", "Special_Requirements",
+    "Pickup_Business", "Delivery_Business",
+    "Pickup_Contact", "Delivery_Contact", "Target_Buy_Rate",
 ]
 
 _SYSTEM_PROMPT = """You are a freight brokerage data extraction assistant for De Boer Freight.
@@ -96,6 +98,27 @@ Look for any of these and include ALL that apply:
   with weather-sensitive cargo
 - Example: "lift gate, pallet jack, inside delivery"
 - If nothing special mentioned, use empty string ""
+
+PICKUP & DELIVERY BUSINESS NAMES:
+- Pickup_Business: the business name at the pickup location (shipper/warehouse).
+- Delivery_Business: the business name at the delivery location (consignee/receiver).
+- These are the physical locations, NOT the customer/broker who booked the load.
+- "Pick up at Johnson Cold Storage in Miami" → Pickup_Business = "Johnson Cold Storage"
+- "Delivering to Walmart DC #4523 in Dallas" → Delivery_Business = "Walmart DC #4523"
+- "Receiver is Atlantic Fresh Market" → Delivery_Business = "Atlantic Fresh Market"
+- "Loading at the shipper, FreshCo Packing" → Pickup_Business = "FreshCo Packing"
+- If no business name is mentioned for a location, use empty string "".
+
+PICKUP & DELIVERY CONTACTS:
+- Combine all contact info for each location into a single string.
+- Format: "Name / phone / email" — include whichever pieces are available.
+- "Ask for John at the dock, 305-555-1234" → Pickup_Contact = "John / 305-555-1234"
+- "Receiving dept: Jane Smith jane@example.com" → Delivery_Contact = "Jane Smith / jane@example.com"
+- "Call Mike at 786-555-0000 when 30 min out" → include in the relevant contact field
+  with the note: "Mike / 786-555-0000 / call 30 min out"
+- If the sender provides their own contact info for coordination, use it for the
+  relevant contact field.
+- If no contact info is given, use empty string "".
 
 GENERAL:
 - Be aggressive about extracting data. This is a freight brokerage inbox — assume
