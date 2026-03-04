@@ -131,7 +131,9 @@ def run() -> list[str]:
             import re as _re
             email_match = _re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', from_addr)
             customer_email = email_match.group(0) if email_match else from_addr
-            fields.setdefault("Customer_Email", customer_email)
+            # Always set Customer_Email from From header (Gemini often returns "" for this)
+            if not fields.get("Customer_Email"):
+                fields["Customer_Email"] = customer_email
             fields.update({
                 "Load_ID": load_id,
                 "Customer_Rate": "",

@@ -106,10 +106,15 @@ Look for any of these and include ALL that apply:
   TWIC card required, pilot car needed
 - Commodity-specific: "tarp required" for exposed flatbed loads (steel, lumber, etc.),
   "temperature monitoring" for reefer loads
+- Temperature requirements: if a specific temp is mentioned ("set reefer to -10",
+  "maintain 34 degrees", "frozen at 0°F", "keep at 35°F"), include it:
+  e.g., "temp: -10°F", "temp: 34°F", "temp: 0°F continuous"
+- For reefer loads, ALWAYS include "temperature monitoring" in special requirements
 - Infer when appropriate: "lift gate" if loading/unloading at a location without a dock
   (theaters, residences, retail stores), "pallet jack" if mentioned, "tarp" if flatbed
   with weather-sensitive cargo
 - Example: "lift gate, pallet jack, inside delivery"
+- Example: "temp: -10°F, temperature monitoring"
 - If nothing special mentioned, use empty string ""
 
 PICKUP & DELIVERY BUSINESS NAMES:
