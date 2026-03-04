@@ -63,6 +63,7 @@ def run() -> list[str]:
 
             logger.info("[%s] Processing new load email from %s: '%s' (body: %d chars)",
                         msg_id, from_addr, subject, len(body))
+            logger.info("[%s] Body preview: %.300s", msg_id, body)
 
             # ── Step 1: Classify the email ──
             classification = classify_email(body, subject, from_addr)

@@ -118,14 +118,23 @@ def _decode_part(part: dict) -> str:
 
 def _strip_html(html: str) -> str:
     """Convert HTML to plain text by stripping tags."""
+    # Remove <style> and <script> blocks entirely
+    text = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.IGNORECASE | re.DOTALL)
+    # Remove Gmail quoted-reply sections (previous messages in thread)
+    text = re.sub(r'<div class="gmail_quote".*', '', text, flags=re.IGNORECASE | re.DOTALL)
     # Replace <br>, <p>, <div> with newlines
-    text = re.sub(r'<br\s*/?\s*>', '\n', html, flags=re.IGNORECASE)
-    text = re.sub(r'</(p|div|tr|li)>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<br\s*/?\s*>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</(p|div|tr|li|h[1-6])>', '\n', text, flags=re.IGNORECASE)
     # Remove all remaining tags
     text = re.sub(r'<[^>]+>', '', text)
     # Decode HTML entities
-    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-    text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+    import html as html_mod
+    try:
+        text = html_mod.unescape(text)
+    except Exception:
+        text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
     # Collapse whitespace but keep newlines
     lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in text.splitlines()]
     return '\n'.join(line for line in lines if line)
