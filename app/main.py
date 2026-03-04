@@ -214,9 +214,9 @@ def compliance_job():
 @app.post("/debug/parse-test")
 def parse_test():
     """Test the Gemini parser with a sample email body."""
-    from app.ai_parser import classify_email, parse_with_gemini, check_completeness
+    import traceback
+    from app.ai_parser import _call_gemini, classify_email, parse_with_gemini, check_completeness
 
-    # Hard-coded test email for debugging
     test_body = (
         "Hey, this is Derek with Atlantic seafood. I need 30,000 pounds of frozen shrimp "
         "moved from key West to Miami tomorrow at 8 AM. Can you get the job done for $800? "
@@ -227,12 +227,23 @@ def parse_test():
     output: dict[str, Any] = {}
     output["test_email"] = test_body
 
+    # Step 1: Test raw Gemini call directly
+    try:
+        raw = _call_gemini("Return ONLY this JSON: {\"test\": \"hello\"}", max_tokens=64)
+        output["gemini_raw_test"] = raw
+    except Exception as e:
+        output["gemini_raw_error"] = str(e)
+        output["gemini_raw_traceback"] = traceback.format_exc()
+
+    # Step 2: Classification
     try:
         classification = classify_email(test_body, test_subject, "derek@atlanticseafood.com")
         output["classification"] = classification
     except Exception as e:
         output["classification_error"] = str(e)
+        output["classification_traceback"] = traceback.format_exc()
 
+    # Step 3: Parsing
     try:
         parsed = parse_with_gemini(test_body, test_subject)
         output["gemini_parsed"] = parsed
@@ -240,6 +251,7 @@ def parse_test():
         output["completeness"] = completeness
     except Exception as e:
         output["parse_error"] = str(e)
+        output["parse_traceback"] = traceback.format_exc()
 
     return JSONResponse(content=output)
 
