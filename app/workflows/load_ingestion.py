@@ -31,6 +31,7 @@ from app.ai_parser import (
     classify_email, parse_with_gemini,
     check_completeness, build_missing_fields_reply,
 )
+from app.equipment import recommend_equipment
 
 logger = logging.getLogger("brokerops.workflows.load_ingestion")
 
@@ -123,17 +124,50 @@ def run() -> list[str]:
             final_filled = sum(1 for f in key_fields if fields.get(f))
             logger.info("[%s] Merged result: %d/%d key fields filled", msg_id, final_filled, len(key_fields))
 
+            # ── Step 3: Equipment intelligence ──
+            equip_rec = recommend_equipment(fields)
+            logger.info("[%s] Equipment recommendation: %s (tier: %s, verify: %s)",
+                        msg_id, equip_rec["recommended"], equip_rec["cost_tier"],
+                        equip_rec["requires_verification"])
+
+            # Apply equipment recommendation if Gemini didn't set it
+            if not fields.get("Equipment_Type") and equip_rec.get("recommended_type"):
+                fields["Equipment_Type"] = equip_rec["recommended_type"]
+                logger.info("[%s] Applied inferred equipment: %s", msg_id, equip_rec["recommended_type"])
+
+            # Append inferred special requirements
+            existing_special = fields.get("Special_Requirements", "")
+            inferred = equip_rec.get("special_requirements_inferred", [])
+            if inferred:
+                combined = [existing_special] if existing_special else []
+                combined.extend(inferred)
+                fields["Special_Requirements"] = ", ".join(combined)
+
             load_id = get_next_load_id()
 
             # Fill in system fields
             today = date.today().isoformat()
-            # Extract email address from From header (e.g., "Derek <derek@example.com>" → "derek@example.com")
+            # Extract email address from From header
             import re as _re
             email_match = _re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', from_addr)
             customer_email = email_match.group(0) if email_match else from_addr
             # Always set Customer_Email from From header (Gemini often returns "" for this)
             if not fields.get("Customer_Email"):
                 fields["Customer_Email"] = customer_email
+
+            # Build internal notes with equipment intelligence
+            equip_notes = []
+            if equip_rec.get("warnings"):
+                equip_notes.append("WARNINGS: " + "; ".join(equip_rec["warnings"]))
+            if equip_rec.get("alternatives"):
+                equip_notes.append("Alt trailers: " + ", ".join(equip_rec["alternatives"]))
+            if equip_rec.get("notes"):
+                equip_notes.append(equip_rec["notes"])
+
+            internal_note = f"Ingested from Gmail msg {msg_id}"
+            if equip_notes:
+                internal_note += " | EQUIP: " + " | ".join(equip_notes)
+
             fields.update({
                 "Load_ID": load_id,
                 "Customer_Rate": "",
@@ -143,8 +177,15 @@ def run() -> list[str]:
                 "RFQ_Count": "0",
                 "Created_Date": today,
                 "Last_Updated": today,
-                "Internal_Notes": f"Ingested from Gmail msg {msg_id}",
+                "Internal_Notes": internal_note,
             })
+
+            # ── Step 3b: Request packing slip if verification needed ──
+            if equip_rec["requires_verification"]:
+                fields["Load_Status"] = "VERIFY"
+                verification_note = "NEEDS VERIFICATION: " + "; ".join(equip_rec["verification_reasons"])
+                fields["Internal_Notes"] = verification_note + " | " + internal_note
+                logger.info("[%s] Load needs verification: %s", msg_id, equip_rec["verification_reasons"])
 
             # Insert into Load_Master
             insert_load(fields)

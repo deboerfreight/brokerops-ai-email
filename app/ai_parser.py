@@ -59,11 +59,26 @@ DATE & TIME RULES:
 
 EQUIPMENT INFERENCE RULES (this is critical for freight):
 - Use one of: DRY_VAN, FLATBED, REEFER, CONESTOGA, BOX_TRUCK, SPRINTER, HOTSHOT
-- If commodity is frozen, refrigerated, cold, or perishable → REEFER
-- "Frozen shrimp", "frozen anything", "ice cream", "produce", "meat", "dairy" → REEFER
-- If commodity is steel, lumber, machinery, equipment, pipes, beams → FLATBED
-- If no equipment mentioned and commodity doesn't suggest otherwise → DRY_VAN
+- REEFER triggers: frozen, refrigerated, cold, perishable, seafood, fish, shrimp, lobster,
+  crab, meat, poultry, chicken, pork, beef, produce, fruit, vegetables, dairy, milk,
+  cheese, yogurt, ice cream, pharmaceutical, vaccine
+- FLATBED triggers: steel, rebar, pipe, lumber, timber, plywood, machinery, equipment,
+  beams, coils, concrete, cinder block, roofing, shingles, solar panels
+- CONESTOGA: flatbed loads that need weather protection but side/top loading access
+- BOX_TRUCK: loads under 8,000 lbs going to residential or non-dock locations
+- SPRINTER: small urgent loads under 5,000 lbs / under 533 cubic feet
+- HOTSHOT: flatbed loads under 16,500 lbs — cheapest open-deck option
+- Default (nothing else fits): DRY_VAN
 - Set Temp_Control_Required to "TRUE" whenever Equipment_Type is REEFER
+
+TRAILER CAPACITY REFERENCE (use to flag potential issues):
+- DRY_VAN 53': max 45,000 lbs, 4,054 cu ft, 26 pallets
+- FLATBED 53': max 48,000 lbs, 26 pallets
+- REEFER 53': max 43,500 lbs, 3,000 cu ft, 26 pallets
+- BOX_TRUCK 26': max 8,000 lbs (with liftgate), 1,800 cu ft
+- SPRINTER: max 5,000 lbs, 533 cu ft
+- HOTSHOT 40': max 16,500 lbs (non-CDL)
+- Federal GVW limit: 80,000 lbs total
 
 WEIGHT RULES:
 - "30,000 pounds" or "30000 lbs" = 30000
