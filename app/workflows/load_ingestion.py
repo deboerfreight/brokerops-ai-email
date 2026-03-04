@@ -94,25 +94,32 @@ def run() -> list[str]:
 
             # Categories NEW_LOAD and LOAD_UPDATE proceed to ingestion
 
-            # ── Step 2: Smart parse chain – regex first, then Gemini AI fallback ──
-            fields = parse_load_email(body, subject)
-
-            # Count how many key fields the regex parser found
+            # ── Step 2: Parse with both regex and Gemini AI, merge results ──
+            # Regex is fast and handles well-structured emails
+            regex_fields = parse_load_email(body, subject)
             key_fields = ["Origin_City", "Destination_City", "Pickup_Date",
                           "Equipment_Type", "Commodity", "Weight_Lbs"]
-            filled = sum(1 for f in key_fields if fields.get(f))
-            logger.info("[%s] Regex parser filled %d/%d key fields", msg_id, filled, len(key_fields))
+            regex_filled = sum(1 for f in key_fields if regex_fields.get(f))
+            logger.info("[%s] Regex parser filled %d/%d key fields", msg_id, regex_filled, len(key_fields))
 
-            # If regex got fewer than half the key fields, use Gemini
-            if filled < len(key_fields) // 2:
-                logger.info("[%s] Falling back to Gemini AI parser", msg_id)
-                ai_fields = parse_with_gemini(body, subject)
-                # Merge: AI fills in blanks, regex values take priority
-                for k, v in ai_fields.items():
-                    if not fields.get(k) and v:
-                        fields[k] = v
-                filled_after = sum(1 for f in key_fields if fields.get(f))
-                logger.info("[%s] After Gemini: %d/%d key fields filled", msg_id, filled_after, len(key_fields))
+            # Always run Gemini for best results — it handles casual language
+            logger.info("[%s] Running Gemini AI parser", msg_id)
+            ai_fields = parse_with_gemini(body, subject)
+            ai_filled = sum(1 for f in key_fields if ai_fields.get(f))
+            logger.info("[%s] Gemini parser filled %d/%d key fields", msg_id, ai_filled, len(key_fields))
+
+            # Merge: use whichever parser got each field, prefer Gemini for
+            # fields it found since it understands context better
+            fields = {}
+            all_field_names = set(list(regex_fields.keys()) + list(ai_fields.keys()))
+            for k in all_field_names:
+                ai_val = ai_fields.get(k, "")
+                regex_val = regex_fields.get(k, "")
+                # Prefer Gemini value if it has one, fall back to regex
+                fields[k] = ai_val if ai_val else regex_val
+
+            final_filled = sum(1 for f in key_fields if fields.get(f))
+            logger.info("[%s] Merged result: %d/%d key fields filled", msg_id, final_filled, len(key_fields))
 
             load_id = get_next_load_id()
 
