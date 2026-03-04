@@ -157,7 +157,7 @@ def _get_gemini_api_key() -> str:
     return _gemini_api_key
 
 
-def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
+def _call_gemini(prompt: str, max_tokens: int = 2048) -> str:
     """
     Send a prompt to Gemini via the Google AI Studio API (API key auth).
     """
@@ -169,6 +169,8 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
             "temperature": 0.1,
             "maxOutputTokens": max_tokens,
         },
+        # Disable thinking mode so all output tokens go to the JSON response
+        "thinkingConfig": {"thinkingBudget": 0},
     }
 
     models = ["gemini-2.5-flash", "gemini-2.5-pro"]
