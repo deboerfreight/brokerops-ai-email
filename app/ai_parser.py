@@ -194,12 +194,29 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
                 continue
 
             data = resp.json()
-            text = (
+            # Gemini 2.5 models return multiple parts: thinking parts
+            # (with "thought": true) and the actual response. We need
+            # the LAST non-thought part which contains the real answer.
+            parts = (
                 data.get("candidates", [{}])[0]
                 .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
+                .get("parts", [])
             )
+
+            text = ""
+            for part in parts:
+                if part.get("thought"):
+                    # Skip thinking/reasoning parts
+                    continue
+                if part.get("text"):
+                    text = part["text"]
+
+            if not text and parts:
+                # Fallback: if no non-thought part found, use the last part
+                text = parts[-1].get("text", "")
+
+            logger.info("Gemini response: %d parts, extracted text length: %d",
+                        len(parts), len(text))
 
             # Clean up markdown code fences Gemini sometimes adds
             text = text.strip()
