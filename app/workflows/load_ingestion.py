@@ -61,7 +61,8 @@ def run() -> list[str]:
             body = get_body_text(msg)
             from_addr = get_header(msg, "From")
 
-            logger.info("[%s] Processing new load email from %s: '%s'", msg_id, from_addr, subject)
+            logger.info("[%s] Processing new load email from %s: '%s' (body: %d chars)",
+                        msg_id, from_addr, subject, len(body))
 
             # ── Step 1: Classify the email ──
             classification = classify_email(body, subject, from_addr)

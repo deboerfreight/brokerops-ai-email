@@ -108,20 +108,70 @@ def get_header(msg: dict, name: str) -> str:
     return ""
 
 
-def get_body_text(msg: dict) -> str:
-    """Best-effort extraction of the plain-text body."""
-    payload = msg.get("payload", {})
-    # Simple single-part
-    if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
-        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
-    # Multipart
+def _decode_part(part: dict) -> str:
+    """Decode a MIME part's body data to string."""
+    data = part.get("body", {}).get("data", "")
+    if data:
+        return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+    return ""
+
+
+def _strip_html(html: str) -> str:
+    """Convert HTML to plain text by stripping tags."""
+    # Replace <br>, <p>, <div> with newlines
+    text = re.sub(r'<br\s*/?\s*>', '\n', html, flags=re.IGNORECASE)
+    text = re.sub(r'</(p|div|tr|li)>', '\n', text, flags=re.IGNORECASE)
+    # Remove all remaining tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Decode HTML entities
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&nbsp;', ' ')
+    # Collapse whitespace but keep newlines
+    lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in text.splitlines()]
+    return '\n'.join(line for line in lines if line)
+
+
+def _find_parts(payload: dict, mime_type: str) -> list[str]:
+    """Recursively find all parts matching a MIME type."""
+    results = []
+    if payload.get("mimeType") == mime_type:
+        text = _decode_part(payload)
+        if text:
+            results.append(text)
     for part in payload.get("parts", []):
-        if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
-            return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
-        # Nested multipart
+        if part.get("mimeType") == mime_type:
+            text = _decode_part(part)
+            if text:
+                results.append(text)
+        # Nested multipart (e.g., multipart/alternative inside multipart/mixed)
         for sub in part.get("parts", []):
-            if sub.get("mimeType") == "text/plain" and sub.get("body", {}).get("data"):
-                return base64.urlsafe_b64decode(sub["body"]["data"]).decode("utf-8", errors="replace")
+            if sub.get("mimeType") == mime_type:
+                text = _decode_part(sub)
+                if text:
+                    results.append(text)
+    return results
+
+
+def get_body_text(msg: dict) -> str:
+    """Best-effort extraction of email body as plain text.
+    Tries text/plain first, falls back to text/html with tag stripping."""
+    payload = msg.get("payload", {})
+
+    # Try plain text first
+    plain_parts = _find_parts(payload, "text/plain")
+    if plain_parts:
+        body = plain_parts[0]
+        logger.debug("Extracted plain text body (%d chars)", len(body))
+        return body
+
+    # Fall back to HTML → strip tags
+    html_parts = _find_parts(payload, "text/html")
+    if html_parts:
+        body = _strip_html(html_parts[0])
+        logger.info("No plain text found; extracted from HTML (%d chars)", len(body))
+        return body
+
+    logger.warning("No text/plain or text/html body found in message")
     return ""
 
 
