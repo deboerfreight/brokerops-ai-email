@@ -89,11 +89,12 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
     project = settings.GCP_PROJECT_ID
     region = settings.GCP_REGION
 
-    endpoint = (
-        f"https://{region}-aiplatform.googleapis.com/v1/"
-        f"projects/{project}/locations/{region}/"
-        f"publishers/google/models/gemini-2.0-flash:generateContent"
-    )
+    # Try multiple model names in case one isn't available
+    models = [
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+    ]
 
     credentials, _ = google.auth.default(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
@@ -109,32 +110,54 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
         },
     }
 
-    resp = httpx.post(
-        endpoint,
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {credentials.token}",
-            "Content-Type": "application/json",
-        },
-        timeout=30.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    last_error = None
+    for model in models:
+        endpoint = (
+            f"https://{region}-aiplatform.googleapis.com/v1/"
+            f"projects/{project}/locations/{region}/"
+            f"publishers/google/models/{model}:generateContent"
+        )
 
-    text = (
-        data.get("candidates", [{}])[0]
-        .get("content", {})
-        .get("parts", [{}])[0]
-        .get("text", "")
-    )
+        try:
+            resp = httpx.post(
+                endpoint,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {credentials.token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                error_body = resp.text[:500]
+                logger.warning("Gemini model '%s' returned %d: %s", model, resp.status_code, error_body)
+                last_error = f"{model}: {resp.status_code} - {error_body}"
+                continue
 
-    # Clean up markdown code fences Gemini sometimes adds
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-    if text.endswith("```"):
-        text = text.rsplit("```", 1)[0]
-    return text.strip()
+            data = resp.json()
+            text = (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+            )
+
+            # Clean up markdown code fences Gemini sometimes adds
+            text = text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1]
+            if text.endswith("```"):
+                text = text.rsplit("```", 1)[0]
+
+            logger.info("Gemini call succeeded with model '%s'", model)
+            return text.strip()
+
+        except Exception as e:
+            logger.warning("Gemini model '%s' failed: %s", model, e)
+            last_error = f"{model}: {str(e)}"
+            continue
+
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
 
 
 # ── Email classification ───────────────────────────────────────────────────
