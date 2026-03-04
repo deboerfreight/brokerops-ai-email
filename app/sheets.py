@@ -38,7 +38,7 @@ def append_row(sheet_id: str, range_: str, row: list, value_input: str = "USER_E
     existing = _svc().values().get(spreadsheetId=sheet_id, range=range_).execute()
     existing_rows = existing.get("values", [])
     next_row = len(existing_rows) + 1
-    # Extract tab name from range (e.g., "Loads!A:Z" -> "Loads")
+    # Extract tab name from range (e.g., "Loads!A:AF" -> "Loads")
     tab = range_.split("!")[0] if "!" in range_ else "Sheet1"
 
     # Auto-expand grid if the tab doesn't have enough rows
@@ -109,14 +109,16 @@ def get_broker_settings() -> dict[str, str]:
 
 LOAD_MASTER_COLUMNS = [
     "Load_ID", "Customer_Name",
+    "Pickup_Date", "Pickup_Time_Window",
+    "Commodity",
     "Origin_City", "Origin_State", "Origin_Zip",
+    "Pickup_Business_Name", "Pickup_Contact",
+    "Delivery_Date", "Delivery_Time_Window",
     "Destination_City", "Destination_State", "Destination_Zip",
-    "Pickup_Date", "Pickup_Time_Window", "Delivery_Date", "Delivery_Time_Window",
-    "Equipment_Type", "Commodity", "Weight_Lbs",
-    "Temp_Control_Required", "Hazmat",
+    "Delivery_Business_Name", "Delivery_Contact",
+    "Equipment_Type", "Weight_Lbs", "Dimensions",
     "Special_Requirements",
-    "Pickup_Business", "Delivery_Business",
-    "Pickup_Contact", "Delivery_Contact",
+    "Temp_Control_Required", "Hazmat",
     "Target_Buy_Rate", "Customer_Rate",
     "Assigned_Carrier_MC",
     "Load_Status", "Approval_Status",
@@ -127,7 +129,7 @@ LOAD_MASTER_COLUMNS = [
 def insert_load(load: dict[str, Any]) -> None:
     """Append a new load row to Load_Master."""
     row = [load.get(c, "") for c in LOAD_MASTER_COLUMNS]
-    append_row(get_settings().LOAD_MASTER_SHEET_ID, "Loads!A:Z", row)
+    append_row(get_settings().LOAD_MASTER_SHEET_ID, "Loads!A:AF", row)
     logger.info("Inserted load %s into Load_Master", load.get("Load_ID"))
 
 
@@ -147,7 +149,7 @@ def update_load_fields(load_id: str, updates: dict[str, Any]) -> None:
 
 def get_load(load_id: str) -> Optional[dict[str, str]]:
     """Fetch a single load row by Load_ID."""
-    rows = read_range(get_settings().LOAD_MASTER_SHEET_ID, "Loads!A:Z")
+    rows = read_range(get_settings().LOAD_MASTER_SHEET_ID, "Loads!A:AF")
     if not rows:
         return None
     headers = rows[0]
@@ -160,7 +162,7 @@ def get_load(load_id: str) -> Optional[dict[str, str]]:
 
 def get_loads_by_status(status: str) -> list[dict[str, str]]:
     """Return all loads matching a given Load_Status."""
-    rows = read_range(get_settings().LOAD_MASTER_SHEET_ID, "Loads!A:Z")
+    rows = read_range(get_settings().LOAD_MASTER_SHEET_ID, "Loads!A:AF")
     if not rows:
         return []
     headers = rows[0]

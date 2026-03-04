@@ -19,13 +19,16 @@ logger = logging.getLogger("brokerops.ai_parser")
 
 # Fields we ask Gemini to extract – must match Load_Master column names
 _FIELDS = [
-    "Customer_Name", "Origin_City", "Origin_State", "Origin_Zip",
+    "Customer_Name",
+    "Pickup_Date", "Pickup_Time_Window", "Commodity",
+    "Origin_City", "Origin_State", "Origin_Zip",
+    "Pickup_Business_Name_Name", "Pickup_Contact",
+    "Delivery_Date", "Delivery_Time_Window",
     "Destination_City", "Destination_State", "Destination_Zip",
-    "Pickup_Date", "Pickup_Time_Window", "Delivery_Date", "Delivery_Time_Window",
-    "Equipment_Type", "Commodity", "Weight_Lbs",
-    "Temp_Control_Required", "Hazmat", "Special_Requirements",
-    "Pickup_Business", "Delivery_Business",
-    "Pickup_Contact", "Delivery_Contact", "Target_Buy_Rate",
+    "Delivery_Business_Name_Name", "Delivery_Contact",
+    "Equipment_Type", "Weight_Lbs", "Dimensions",
+    "Special_Requirements", "Temp_Control_Required", "Hazmat",
+    "Target_Buy_Rate",
 ]
 
 _SYSTEM_PROMPT = """You are a freight brokerage data extraction assistant for De Boer Freight.
@@ -67,6 +70,14 @@ WEIGHT RULES:
 - "44k lbs" or "44K" = 44000
 - "30,000 pounds of frozen shrimp" → Weight_Lbs = "30000"
 
+DIMENSIONS:
+- Dimensions: length x width x height of the freight, or overall footprint.
+- Use format like "48x40x48 in" or "8ft x 4ft x 4ft" — keep the unit as given.
+- "6 pallets, 48x40" → Dimensions = "6 pallets 48x40 in"
+- "10 ft long, 4 ft wide" → Dimensions = "10x4 ft"
+- If only pallet count given: "8 pallets" → Dimensions = "8 pallets"
+- If nothing about size/dimensions/pallets mentioned, use empty string "".
+
 LOCATION INFERENCE:
 - Always infer state from city when possible. "Key West" → FL, "Miami" → FL,
   "Houston" → TX, "Chicago" → IL, "Dallas" → TX, "Memphis" → TN, etc.
@@ -100,13 +111,13 @@ Look for any of these and include ALL that apply:
 - If nothing special mentioned, use empty string ""
 
 PICKUP & DELIVERY BUSINESS NAMES:
-- Pickup_Business: the business name at the pickup location (shipper/warehouse).
-- Delivery_Business: the business name at the delivery location (consignee/receiver).
+- Pickup_Business_Name: the business name at the pickup location (shipper/warehouse).
+- Delivery_Business_Name: the business name at the delivery location (consignee/receiver).
 - These are the physical locations, NOT the customer/broker who booked the load.
-- "Pick up at Johnson Cold Storage in Miami" → Pickup_Business = "Johnson Cold Storage"
-- "Delivering to Walmart DC #4523 in Dallas" → Delivery_Business = "Walmart DC #4523"
-- "Receiver is Atlantic Fresh Market" → Delivery_Business = "Atlantic Fresh Market"
-- "Loading at the shipper, FreshCo Packing" → Pickup_Business = "FreshCo Packing"
+- "Pick up at Johnson Cold Storage in Miami" → Pickup_Business_Name = "Johnson Cold Storage"
+- "Delivering to Walmart DC #4523 in Dallas" → Delivery_Business_Name = "Walmart DC #4523"
+- "Receiver is Atlantic Fresh Market" → Delivery_Business_Name = "Atlantic Fresh Market"
+- "Loading at the shipper, FreshCo Packing" → Pickup_Business_Name = "FreshCo Packing"
 - If no business name is mentioned for a location, use empty string "".
 
 PICKUP & DELIVERY CONTACTS:
