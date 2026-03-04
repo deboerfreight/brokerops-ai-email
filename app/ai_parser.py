@@ -86,7 +86,11 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
     Uses Application Default Credentials (works automatically on Cloud Run).
     """
     credentials, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        scopes=[
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/generative-language",
+            "https://www.googleapis.com/auth/generative-language.retriever",
+        ]
     )
     auth_req = google.auth.transport.requests.Request()
     credentials.refresh(auth_req)
