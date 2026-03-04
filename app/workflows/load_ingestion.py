@@ -127,6 +127,11 @@ def run() -> list[str]:
 
             # Fill in system fields
             today = date.today().isoformat()
+            # Extract email address from From header (e.g., "Derek <derek@example.com>" → "derek@example.com")
+            import re as _re
+            email_match = _re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', from_addr)
+            customer_email = email_match.group(0) if email_match else from_addr
+            fields.setdefault("Customer_Email", customer_email)
             fields.update({
                 "Load_ID": load_id,
                 "Customer_Rate": "",

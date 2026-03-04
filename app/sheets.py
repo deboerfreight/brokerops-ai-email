@@ -108,7 +108,7 @@ def get_broker_settings() -> dict[str, str]:
 # ── Load_Master data tab ────────────────────────────────────────────────────
 
 LOAD_MASTER_COLUMNS = [
-    "Load_ID", "Customer_Name",
+    "Load_ID", "Customer_Email",
     "Pickup_Date", "Pickup_Time_Window",
     "Commodity",
     "Origin_City", "Origin_State", "Origin_Zip",

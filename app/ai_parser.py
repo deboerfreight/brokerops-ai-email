@@ -19,7 +19,7 @@ logger = logging.getLogger("brokerops.ai_parser")
 
 # Fields we ask Gemini to extract – must match Load_Master column names
 _FIELDS = [
-    "Customer_Name",
+    "Customer_Email",
     "Pickup_Date", "Pickup_Time_Window", "Commodity",
     "Origin_City", "Origin_State", "Origin_Zip",
     "Pickup_Business_Name", "Pickup_Contact",
@@ -88,10 +88,12 @@ RATE/PRICE RULES:
 - "$800", "800 dollars", "budget of $800", "can you do it for 800" → Target_Buy_Rate = "800"
 - Remove $ signs and commas from the number.
 
-CUSTOMER NAME:
-- "This is Derek with Atlantic Seafood" → Customer_Name = "Atlantic Seafood"
-- "John from XYZ Logistics" → Customer_Name = "XYZ Logistics"
-- Use the company name, not the person's name.
+CUSTOMER EMAIL:
+- Customer_Email: the sender's email address from the "From:" header.
+- Extract ONLY the email address, not the display name.
+- "From: Derek deBoer <derek@atlantic.com>" → Customer_Email = "derek@atlantic.com"
+- "From: john@xyzlogistics.com" → Customer_Email = "john@xyzlogistics.com"
+- If no email address is visible, use empty string "".
 
 SPECIAL REQUIREMENTS (comma-separated list, or empty string if none):
 Look for any of these and include ALL that apply:
@@ -390,7 +392,7 @@ REQUIRED_FIELDS = [
 
 # Fields we strongly want but can proceed without
 PREFERRED_FIELDS = [
-    "Customer_Name", "Commodity", "Weight_Lbs", "Target_Buy_Rate",
+    "Customer_Email", "Commodity", "Weight_Lbs", "Target_Buy_Rate",
 ]
 
 
@@ -419,7 +421,7 @@ def build_missing_fields_reply(
         "Destination_State": "destination state",
         "Pickup_Date": "pickup date",
         "Equipment_Type": "equipment/trailer type",
-        "Customer_Name": "customer/shipper name",
+        "Customer_Email": "customer email address",
         "Commodity": "commodity description",
         "Weight_Lbs": "weight (lbs)",
         "Target_Buy_Rate": "target rate/budget",
