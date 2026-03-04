@@ -77,7 +77,7 @@ def run() -> list[str]:
                 mark_message_processed(msg_id, "reclassified:CARRIER_QUOTE")
                 continue
 
-            if category == "OTHER" and confidence > 0.8:
+            if category == "OTHER" and confidence >= 0.95:
                 # High confidence it's not load-related – block it
                 logger.info("[%s] Classified as OTHER (%.0f%%) – blocking",
                             msg_id, confidence * 100)

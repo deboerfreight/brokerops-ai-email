@@ -108,24 +108,36 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
 
 # ── Email classification ───────────────────────────────────────────────────
 
-_CLASSIFY_PROMPT = """You are a freight brokerage email classifier.
+_CLASSIFY_PROMPT = """You are a freight brokerage email classifier for De Boer Freight.
 
-Classify the email below into exactly ONE of these categories:
+This inbox receives emails primarily about freight loads and shipping. Your job is
+to classify each email. When in doubt, lean toward NEW_LOAD — it's better to process
+an email as a potential load than to miss one.
 
-1. NEW_LOAD — A customer or dispatcher requesting a new shipment/load/quote.
-   They want us to move freight from A to B. Includes "quote requests" from
-   shippers asking for pricing on a lane.
+Categories:
 
-2. CARRIER_QUOTE — A motor carrier replying to an RFQ (Request for Quote)
-   that we sent them. They are providing their rate/availability to haul a load.
-   Look for references to a Load_ID (format YYYY-####), "RFQ", or the carrier
-   quoting a price in response to our outreach.
+1. NEW_LOAD — Any email that mentions moving freight, shipping, hauling, needing a
+   truck/trailer, quote requests from shippers, load tenders, rate requests, or
+   anything involving an origin, destination, commodity, or equipment type. Even
+   casual or brief messages like "need a flatbed Dallas to Memphis" count. This is
+   the DEFAULT category — use it unless another category clearly fits better.
+
+2. CARRIER_QUOTE — ONLY use this when a motor carrier is replying to an RFQ that
+   WE sent them. Key indicators: references to a Load_ID (format YYYY-####), "RFQ",
+   "Re: RFQ", or the carrier quoting a rate in response to our outreach. The email
+   must clearly be a RESPONSE to something we sent.
 
 3. LOAD_UPDATE — A follow-up to an existing load: updated pickup times,
-   address corrections, added details, weight changes, etc. Look for references
-   to an existing Load_ID or phrases like "update", "correction", "revised".
+   address corrections, added details, weight changes, etc. Must reference
+   an existing Load_ID or explicitly say "update", "correction", "revised".
 
-4. OTHER — Anything else (general inquiries, spam, personal emails, etc.)
+4. OTHER — ONLY use this when the email has absolutely nothing to do with freight,
+   shipping, or logistics. Examples: marketing spam, personal emails, IT notifications,
+   invoice requests with no load context.
+
+IMPORTANT: If the email mentions ANY freight/shipping concepts (cities, equipment,
+weight, pickup, delivery, commodity, rate, truck, trailer, haul, ship, load, freight),
+classify as NEW_LOAD.
 
 Return ONLY a JSON object with these fields:
 - "category": one of "NEW_LOAD", "CARRIER_QUOTE", "LOAD_UPDATE", "OTHER"

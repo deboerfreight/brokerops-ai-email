@@ -260,14 +260,26 @@ def ingest_test():
         output["search_messages_error"] = str(e)
         output["search_messages_traceback"] = traceback.format_exc()
 
-    # 5. Check processed status
+    # 5. Check processed status + classify each message
     if sm_results:
+        from app.gmail import get_message, get_body_text, get_header
+        from app.ai_parser import classify_email
         for m in sm_results[:5]:
             mid = m["id"]
             try:
                 output[f"is_processed_{mid}"] = is_message_processed(mid)
             except Exception as e:
                 output[f"processed_check_error_{mid}"] = str(e)
+            # Show classification for each message
+            try:
+                full_msg = get_message(mid)
+                subj = get_header(full_msg, "Subject")
+                body = get_body_text(full_msg)
+                from_a = get_header(full_msg, "From")
+                classification = classify_email(body, subj, from_a)
+                output[f"classification_{mid}"] = classification
+            except Exception as e:
+                output[f"classification_error_{mid}"] = str(e)
 
     # 6. Actually run load_ingestion
     try:
