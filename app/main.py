@@ -211,6 +211,39 @@ def compliance_job():
     return {"synced_carriers": synced}
 
 
+@app.post("/debug/parse-test")
+def parse_test():
+    """Test the Gemini parser with a sample email body."""
+    from app.ai_parser import classify_email, parse_with_gemini, check_completeness
+
+    # Hard-coded test email for debugging
+    test_body = (
+        "Hey, this is Derek with Atlantic seafood. I need 30,000 pounds of frozen shrimp "
+        "moved from key West to Miami tomorrow at 8 AM. Can you get the job done for $800? "
+        "Let me know thanks.\n\nSent from my iPhone"
+    )
+    test_subject = "Freight request"
+
+    output: dict[str, Any] = {}
+    output["test_email"] = test_body
+
+    try:
+        classification = classify_email(test_body, test_subject, "derek@atlanticseafood.com")
+        output["classification"] = classification
+    except Exception as e:
+        output["classification_error"] = str(e)
+
+    try:
+        parsed = parse_with_gemini(test_body, test_subject)
+        output["gemini_parsed"] = parsed
+        completeness = check_completeness(parsed)
+        output["completeness"] = completeness
+    except Exception as e:
+        output["parse_error"] = str(e)
+
+    return JSONResponse(content=output)
+
+
 @app.post("/jobs/ingest-test")
 def ingest_test():
     """Run ONLY load ingestion with verbose output for debugging."""

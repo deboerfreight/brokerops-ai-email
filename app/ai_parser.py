@@ -213,14 +213,42 @@ def parse_with_gemini(email_body: str, subject: str = "") -> dict[str, Any]:
     """
     Send the email text to Gemini and return structured fields.
     """
+    from datetime import date
+    today = date.today()
+    today_str = today.strftime("%Y-%m-%d")
+    day_of_week = today.strftime("%A")
+
     full_text = f"Subject: {subject}\n\n{email_body}" if subject else email_body
-    prompt = f"{_SYSTEM_PROMPT}\n\nEmail:\n---\n{full_text}\n---\n\nJSON:"
+    prompt = (
+        f"{_SYSTEM_PROMPT}\n\n"
+        f"TODAY'S DATE: {today_str} ({day_of_week})\n\n"
+        f"Email:\n---\n{full_text}\n---\n\n"
+        f"Extract all load details from this email. Return ONLY a JSON object with "
+        f"the field names listed above. Every value must be a string. Do not return "
+        f"field names as values — return the ACTUAL DATA extracted from the email.\n\n"
+        f"JSON:"
+    )
 
     try:
         text = _call_gemini(prompt)
+        logger.info("Gemini raw response: %s", text[:500])
         parsed = json.loads(text)
-        logger.info("Gemini parsed %d non-empty fields", sum(1 for v in parsed.values() if v))
-        return {k: str(v) if v else "" for k, v in parsed.items() if k in _FIELDS}
+
+        # Validate: reject if values look like field names (a known Gemini failure mode)
+        result = {}
+        for k in _FIELDS:
+            val = parsed.get(k, "")
+            if val is None:
+                val = ""
+            val = str(val).strip()
+            # Reject values that are just the field name or label-like
+            if val.lower().replace("_", " ") in (k.lower().replace("_", " "), k.lower()):
+                val = ""
+            result[k] = val
+
+        filled = sum(1 for v in result.values() if v)
+        logger.info("Gemini parsed %d non-empty fields", filled)
+        return result
     except Exception as e:
         logger.error("Gemini parsing failed: %s", e)
         return {}
