@@ -11,8 +11,6 @@ import json
 import logging
 from typing import Any
 
-import google.auth
-import google.auth.transport.requests
 import httpx
 
 from app.config import get_settings
@@ -80,20 +78,29 @@ GENERAL:
 """.format(fields=", ".join(_FIELDS))
 
 
+_gemini_api_key: str | None = None
+
+
+def _get_gemini_api_key() -> str:
+    """Retrieve the Gemini API key from Secret Manager (cached after first call)."""
+    global _gemini_api_key
+    if _gemini_api_key:
+        return _gemini_api_key
+
+    from google.cloud import secretmanager
+    settings = get_settings()
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{settings.GCP_PROJECT_ID}/secrets/brokerops-gemini-api-key/versions/latest"
+    response = client.access_secret_version(request={"name": name})
+    _gemini_api_key = response.payload.data.decode("UTF-8")
+    return _gemini_api_key
+
+
 def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
     """
-    Send a prompt to Gemini via the Generative Language API.
-    Uses Application Default Credentials (works automatically on Cloud Run).
+    Send a prompt to Gemini via the Google AI Studio API (API key auth).
     """
-    credentials, _ = google.auth.default(
-        scopes=[
-            "https://www.googleapis.com/auth/cloud-platform",
-            "https://www.googleapis.com/auth/generative-language",
-            "https://www.googleapis.com/auth/generative-language.retriever",
-        ]
-    )
-    auth_req = google.auth.transport.requests.Request()
-    credentials.refresh(auth_req)
+    api_key = _get_gemini_api_key()
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -103,24 +110,20 @@ def _call_gemini(prompt: str, max_tokens: int = 1024) -> str:
         },
     }
 
-    # Use the Generative Language API (simpler than Vertex AI)
     models = ["gemini-2.0-flash", "gemini-1.5-flash"]
     last_error = None
 
     for model in models:
         endpoint = (
             f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{model}:generateContent"
+            f"models/{model}:generateContent?key={api_key}"
         )
 
         try:
             resp = httpx.post(
                 endpoint,
                 json=payload,
-                headers={
-                    "Authorization": f"Bearer {credentials.token}",
-                    "Content-Type": "application/json",
-                },
+                headers={"Content-Type": "application/json"},
                 timeout=30.0,
             )
             if resp.status_code != 200:
