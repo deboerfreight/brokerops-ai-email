@@ -416,7 +416,7 @@ def debug_carrier_search():
 
     # Step 1: Raw FMCSA search
     try:
-        raw = search_carriers(state="FL", city="Miami", limit=15)
+        raw = search_carriers(state="FL", city="Miami", equipment_type="REEFER", limit=15)
         output["step1_raw_count"] = len(raw)
         output["step1_samples"] = [
             {

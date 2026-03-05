@@ -61,32 +61,46 @@ def search_carriers(
 ) -> list[dict]:
     """Search FMCSA Census API for carriers by state (and optionally city).
 
-    Uses multiple single-letter name searches to get broad coverage since the
-    FMCSA name endpoint requires a name path parameter.
+    Uses freight-related search terms to find actual trucking/freight carriers
+    rather than random single-letter searches that return passenger carriers.
 
     Returns raw carrier dicts from the API (normalized).
     """
-    # FMCSA /carriers/name/{name} requires a name in the URL path.
-    # We search several common starting letters to get broad coverage.
-    search_letters = ["a", "c", "d", "e", "f", "g", "j", "l", "m", "n", "p", "r", "s", "t"]
+    # Search freight-related company names to find actual trucking carriers.
+    # Single-letter searches return too many passenger/non-freight carriers.
+    search_terms = [
+        "trucking", "freight", "transport", "logistics", "express",
+        "hauling", "carrier", "moving", "delivery", "refrigerated",
+        "cold", "reefer",
+    ]
+
+    # Add equipment-specific terms if searching for specific types
+    if equipment_type:
+        eq = equipment_type.upper()
+        if "REEFER" in eq or "REFRIG" in eq:
+            search_terms = ["refrigerated", "cold", "reefer", "frozen", "temp",
+                           "freight", "trucking", "transport", "logistics", "express"]
+        elif "FLAT" in eq:
+            search_terms = ["flatbed", "steel", "heavy", "haul", "freight",
+                           "trucking", "transport", "logistics", "carrier"]
+
     seen_dots: set[str] = set()
     all_carriers: list[dict] = []
+    per_term = max(limit // 3, 10)
 
-    per_letter = max(limit // 3, 10)
-
-    for letter in search_letters:
+    for term in search_terms:
         if len(all_carriers) >= limit:
             break
 
-        url = f"{_BASE_URL}/name/{letter}"
-        params: dict[str, Any] = {"stateAbbrev": state.upper(), "size": str(per_letter)}
+        url = f"{_BASE_URL}/name/{term}"
+        params: dict[str, Any] = {"stateAbbrev": state.upper(), "size": str(per_term)}
         if city:
             params["city"] = city.upper()
 
         try:
             data = _cached_get(url, params)
         except Exception as exc:
-            logger.debug("FMCSA search letter '%s' failed: %s", letter, exc)
+            logger.debug("FMCSA search '%s' failed: %s", term, exc)
             continue
 
         content = data.get("content", [])
@@ -102,7 +116,10 @@ def search_carriers(
                     seen_dots.add(dot)
                     all_carriers.append(normalized)
 
-    logger.info("FMCSA search: found %d carriers in %s %s", len(all_carriers), city or "", state)
+    logger.info(
+        "FMCSA search: found %d carriers in %s %s (terms: %s)",
+        len(all_carriers), city or "", state, ", ".join(search_terms[:3]),
+    )
     return all_carriers
 
 
@@ -253,27 +270,39 @@ def _normalize_safety_rating(rating: str) -> str:
 
 
 def _detect_equipment(raw: dict) -> list[str]:
-    """Detect equipment types from FMCSA cargo/operation codes."""
+    """Detect equipment types from FMCSA cargo/operation codes.
+
+    The cargoCarried field is populated from the /cargo-carried endpoint
+    as a comma-separated string of cargoClassDesc values like:
+    "General Freight, Refrigerated Food, Fresh Produce"
+    """
     types: set[str] = set()
     cargo_carried = str(raw.get("cargoCarried", "")).upper()
     classification = str(raw.get("operationClassification", "")).upper()
 
     # General freight → dry van
-    if any(k in cargo_carried for k in ["GENERAL FREIGHT", "GEN FREIGHT"]):
+    if any(k in cargo_carried for k in ["GENERAL FREIGHT", "GEN FREIGHT",
+                                         "HOUSEHOLD GOODS", "COMMODITIES"]):
         types.add("DRY_VAN")
-    # Refrigerated
-    if any(k in cargo_carried for k in ["REFRIGERATED", "TEMP CONTROLLED"]):
+    # Refrigerated / temperature-controlled
+    if any(k in cargo_carried for k in ["REFRIGERATED", "TEMP CONTROLLED",
+                                         "FRESH PRODUCE", "FROZEN", "MEAT",
+                                         "BEVERAGES", "FOOD"]):
         types.add("REEFER")
     # Flatbed indicators
     if any(k in cargo_carried for k in ["METAL", "BUILDING MATERIAL", "MACHINERY",
-                                         "LUMBER", "LARGE OBJECTS", "CONSTRUCTION"]):
+                                         "LUMBER", "LARGE OBJECTS", "CONSTRUCTION",
+                                         "INTERMODAL"]):
         types.add("FLATBED")
     # Oversize
     if "OVERSIZE" in cargo_carried or "OVERWEIGHT" in cargo_carried:
         types.add("FLATBED")
+    # Tanker
+    if any(k in cargo_carried for k in ["CHEMICALS", "LIQUIDS", "GASES"]):
+        types.add("TANKER")
 
     # If nothing detected, assume dry van for authorized carriers
-    if not types:
+    if not types and "PASSENGER" not in cargo_carried:
         types.add("DRY_VAN")
 
     return sorted(types)
