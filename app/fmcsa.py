@@ -61,33 +61,49 @@ def search_carriers(
 ) -> list[dict]:
     """Search FMCSA Census API for carriers by state (and optionally city).
 
+    Uses multiple single-letter name searches to get broad coverage since the
+    FMCSA name endpoint requires a name path parameter.
+
     Returns raw carrier dicts from the API (normalized).
     """
-    url = f"{_BASE_URL}/name"
-    # FMCSA name search requires at least a state; we search broadly then filter
-    params: dict[str, Any] = {"stateAbbrev": state.upper(), "size": str(limit)}
-    if city:
-        params["city"] = city.upper()
+    # FMCSA /carriers/name/{name} requires a name in the URL path.
+    # We search several common starting letters to get broad coverage.
+    search_letters = ["a", "c", "d", "e", "f", "g", "j", "l", "m", "n", "p", "r", "s", "t"]
+    seen_dots: set[str] = set()
+    all_carriers: list[dict] = []
 
-    try:
-        data = _cached_get(url, params)
-    except Exception as exc:
-        logger.error("FMCSA search failed (state=%s, city=%s): %s", state, city, exc)
-        return []
+    per_letter = max(limit // 3, 10)
 
-    content = data.get("content", [])
-    if not content:
-        return []
+    for letter in search_letters:
+        if len(all_carriers) >= limit:
+            break
 
-    carriers = []
-    for item in content:
-        carrier_data = item.get("carrier", item)
-        normalized = _normalize_carrier(carrier_data)
-        if normalized:
-            carriers.append(normalized)
+        url = f"{_BASE_URL}/name/{letter}"
+        params: dict[str, Any] = {"stateAbbrev": state.upper(), "size": str(per_letter)}
+        if city:
+            params["city"] = city.upper()
 
-    logger.info("FMCSA search: found %d carriers in %s %s", len(carriers), city or "", state)
-    return carriers
+        try:
+            data = _cached_get(url, params)
+        except Exception as exc:
+            logger.debug("FMCSA search letter '%s' failed: %s", letter, exc)
+            continue
+
+        content = data.get("content", [])
+        if not content:
+            continue
+
+        for item in content:
+            carrier_data = item.get("carrier", item)
+            normalized = _normalize_carrier(carrier_data)
+            if normalized:
+                dot = normalized.get("DOT_Number", "")
+                if dot and dot not in seen_dots:
+                    seen_dots.add(dot)
+                    all_carriers.append(normalized)
+
+    logger.info("FMCSA search: found %d carriers in %s %s", len(all_carriers), city or "", state)
+    return all_carriers
 
 
 def get_carrier_details(dot_number: str) -> Optional[dict]:
