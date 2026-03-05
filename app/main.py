@@ -407,6 +407,79 @@ def ingest_test():
     return JSONResponse(content=output)
 
 
+@app.post("/debug/carrier-search")
+def debug_carrier_search():
+    """Debug: step-by-step carrier search diagnostics."""
+    import traceback
+    from app.fmcsa import search_carriers, get_carrier_details, score_carrier, _detect_equipment
+    output: dict[str, Any] = {}
+
+    # Step 1: Raw FMCSA search
+    try:
+        raw = search_carriers(state="FL", city="Miami", limit=15)
+        output["step1_raw_count"] = len(raw)
+        output["step1_samples"] = [
+            {
+                "Legal_Name": c.get("Legal_Name"),
+                "DOT_Number": c.get("DOT_Number"),
+                "MC_Number": c.get("MC_Number"),
+                "Authority_Status": c.get("Authority_Status"),
+                "Equipment_Types": c.get("Equipment_Types"),
+                "Insurance_Liability": c.get("Insurance_Liability"),
+                "Insurance_Cargo": c.get("Insurance_Cargo"),
+            }
+            for c in raw[:5]
+        ]
+    except Exception as e:
+        output["step1_error"] = str(e)
+        output["step1_traceback"] = traceback.format_exc()
+        return JSONResponse(content=output)
+
+    # Step 2: Detail fetch for first 3
+    for c in raw[:3]:
+        dot = c.get("DOT_Number", "")
+        try:
+            details = get_carrier_details(dot)
+            output[f"step2_details_DOT_{dot}"] = {
+                "Legal_Name": details.get("Legal_Name") if details else None,
+                "Authority_Status": details.get("Authority_Status") if details else None,
+                "Equipment_Types": details.get("Equipment_Types") if details else None,
+                "Insurance_Liability": details.get("Insurance_Liability") if details else None,
+                "Insurance_Cargo": details.get("Insurance_Cargo") if details else None,
+                "Safety_Rating": details.get("Safety_Rating") if details else None,
+                "OOS_Active": details.get("OOS_Active") if details else None,
+                "cargo_carried_raw": details.get("_raw", {}).get("cargoCarried") if details else None,
+            } if details else "FAILED"
+        except Exception as e:
+            output[f"step2_details_DOT_{dot}_error"] = str(e)
+
+    # Step 3: Score first 3 (using details if available)
+    for c in raw[:3]:
+        dot = c.get("DOT_Number", "")
+        details = get_carrier_details(dot)
+        carrier = details or c
+        s = score_carrier(carrier)
+        output[f"step3_score_DOT_{dot}"] = {
+            "name": carrier.get("Legal_Name"),
+            "score": s,
+            "authority": carrier.get("Authority_Status"),
+            "liability": carrier.get("Insurance_Liability"),
+            "cargo_ins": carrier.get("Insurance_Cargo"),
+            "equipment": carrier.get("Equipment_Types"),
+            "safety": carrier.get("Safety_Rating"),
+            "oos": carrier.get("OOS_Active"),
+        }
+
+    # Step 4: Equipment type filter test
+    reefer_count = sum(
+        1 for c in raw
+        if "REEFER" in (c.get("Equipment_Types", "") or "").upper()
+    )
+    output["step4_reefer_filter"] = f"{reefer_count} of {len(raw)} have REEFER equipment"
+
+    return JSONResponse(content=output)
+
+
 @app.get("/debug/labels")
 def debug_labels():
     """Debug: show Gmail labels and search results."""
