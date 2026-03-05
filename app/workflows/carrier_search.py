@@ -53,21 +53,20 @@ def search_and_score(
         else:
             detailed_carriers.append(c)
 
-    # 3. Filter by equipment type if specified
-    if equipment_type:
-        eq_upper = equipment_type.upper()
-        detailed_carriers = [
-            c for c in detailed_carriers
-            if eq_upper in (c.get("Equipment_Types", "") or "").upper()
-        ]
+    logger.info("Fetched details for %d carriers", len(detailed_carriers))
 
-    # 4. Score and filter out disqualified
+    # 3. Score and filter out disqualified; equipment match is a bonus, not a filter
     scored: list[tuple[int, dict]] = []
+    eq_upper = equipment_type.upper() if equipment_type else ""
     for c in detailed_carriers:
         s = score_carrier(c)
         if s < 0:
-            logger.debug("Disqualified: %s (DOT %s) - score %d", c.get("Legal_Name"), c.get("DOT_Number"), s)
+            logger.info("Disqualified: %s (DOT %s) - score %d", c.get("Legal_Name"), c.get("DOT_Number"), s)
             continue
+        # Equipment match bonus (+15) instead of hard filter
+        if eq_upper and eq_upper in (c.get("Equipment_Types", "") or "").upper():
+            s += 15
+            c["Equipment_Match"] = True
         c["Carrier_Score"] = s
         scored.append((s, c))
 

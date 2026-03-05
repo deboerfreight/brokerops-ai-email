@@ -107,7 +107,13 @@ def search_carriers(
 
 
 def get_carrier_details(dot_number: str) -> Optional[dict]:
-    """Fetch full carrier profile from Census API by DOT number."""
+    """Fetch full carrier profile from Census API by DOT number.
+
+    Calls multiple FMCSA endpoints to get complete data:
+    - /carriers/{dot} — basic info
+    - /carriers/{dot}/cargo-carried — cargo types (for equipment detection)
+    - /carriers/{dot}/docket-number — MC/docket numbers
+    """
     url = f"{_BASE_URL}/{dot_number}"
     try:
         data = _cached_get(url)
@@ -119,7 +125,40 @@ def get_carrier_details(dot_number: str) -> Optional[dict]:
     if isinstance(content, list) and content:
         content = content[0]
     carrier_data = content.get("carrier", content) if isinstance(content, dict) else {}
-    return _normalize_carrier(carrier_data) if carrier_data else None
+    if not carrier_data:
+        return None
+
+    # Fetch cargo-carried data (separate endpoint)
+    try:
+        cargo_data = _cached_get(f"{_BASE_URL}/{dot_number}/cargo-carried")
+        cargo_content = cargo_data.get("content", [])
+        if isinstance(cargo_content, list):
+            cargo_descriptions = [
+                str(item.get("cargoCarriedDesc", item.get("cargoClassDesc", "")))
+                for item in cargo_content
+                if isinstance(item, dict)
+            ]
+            carrier_data["cargoCarried"] = ", ".join(d for d in cargo_descriptions if d)
+            carrier_data["_cargoCarriedRaw"] = cargo_content
+    except Exception as exc:
+        logger.debug("Cargo-carried fetch failed for DOT %s: %s", dot_number, exc)
+
+    # Fetch docket/MC numbers (separate endpoint)
+    try:
+        docket_data = _cached_get(f"{_BASE_URL}/{dot_number}/docket-number")
+        docket_content = docket_data.get("content", [])
+        if isinstance(docket_content, list):
+            for item in docket_content:
+                if isinstance(item, dict):
+                    prefix = str(item.get("prefix", "")).upper()
+                    docket_num = str(item.get("docketNumber", ""))
+                    if prefix == "MC" and docket_num:
+                        carrier_data["docketNumber"] = docket_num
+                        break
+    except Exception as exc:
+        logger.debug("Docket-number fetch failed for DOT %s: %s", dot_number, exc)
+
+    return _normalize_carrier(carrier_data)
 
 
 def _normalize_carrier(raw: dict) -> Optional[dict]:

@@ -435,20 +435,22 @@ def debug_carrier_search():
         output["step1_traceback"] = traceback.format_exc()
         return JSONResponse(content=output)
 
-    # Step 2: Detail fetch for first 3
+    # Step 2: Detail fetch for first 3 (now includes cargo + docket endpoints)
     for c in raw[:3]:
         dot = c.get("DOT_Number", "")
         try:
             details = get_carrier_details(dot)
             output[f"step2_details_DOT_{dot}"] = {
                 "Legal_Name": details.get("Legal_Name") if details else None,
+                "MC_Number": details.get("MC_Number") if details else None,
                 "Authority_Status": details.get("Authority_Status") if details else None,
                 "Equipment_Types": details.get("Equipment_Types") if details else None,
                 "Insurance_Liability": details.get("Insurance_Liability") if details else None,
                 "Insurance_Cargo": details.get("Insurance_Cargo") if details else None,
                 "Safety_Rating": details.get("Safety_Rating") if details else None,
                 "OOS_Active": details.get("OOS_Active") if details else None,
-                "cargo_carried_raw": details.get("_raw", {}).get("cargoCarried") if details else None,
+                "cargo_carried_parsed": details.get("_raw", {}).get("cargoCarried") if details else None,
+                "cargo_items_raw": details.get("_raw", {}).get("_cargoCarriedRaw") if details else None,
             } if details else "FAILED"
         except Exception as e:
             output[f"step2_details_DOT_{dot}_error"] = str(e)
@@ -470,12 +472,18 @@ def debug_carrier_search():
             "oos": carrier.get("OOS_Active"),
         }
 
-    # Step 4: Equipment type filter test
-    reefer_count = sum(
-        1 for c in raw
-        if "REEFER" in (c.get("Equipment_Types", "") or "").upper()
-    )
-    output["step4_reefer_filter"] = f"{reefer_count} of {len(raw)} have REEFER equipment"
+    # Step 4: Equipment type detection test (after cargo data fetch)
+    detailed_equip = {}
+    for c in raw[:5]:
+        dot = c.get("DOT_Number", "")
+        d = get_carrier_details(dot)
+        if d:
+            detailed_equip[dot] = {
+                "name": d.get("Legal_Name"),
+                "equipment": d.get("Equipment_Types"),
+                "cargo_raw": d.get("_raw", {}).get("cargoCarried"),
+            }
+    output["step4_equipment_with_cargo_data"] = detailed_equip
 
     return JSONResponse(content=output)
 
