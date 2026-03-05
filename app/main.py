@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse, JSONResponse
+from pydantic import BaseModel
 
 from app.config import get_settings, Settings
 from app.google_auth import build_oauth_flow, exchange_code
@@ -199,6 +200,68 @@ def poll_job():
     logger.info("Poll job completed in %.2fs. Report: %s", elapsed, report)
 
     return JSONResponse(content=report)
+
+
+# ── Carrier search endpoints ─────────────────────────────────────────────────
+
+
+class CarrierSearchRequest(BaseModel):
+    city: str
+    state: str
+    radius: int = 50
+    equipment_type: str | None = None
+    limit: int = 10
+
+
+class LaneSearchRequest(BaseModel):
+    origin_city: str
+    origin_state: str
+    dest_city: str
+    dest_state: str
+    equipment_type: str | None = None
+    limit: int = 10
+
+
+@app.post("/carriers/search")
+def carrier_search(req: CarrierSearchRequest):
+    """Search FMCSA for carriers, score, enrich emails, store in Carrier_Master."""
+    from app.workflows.carrier_search import search_and_score
+    results = search_and_score(
+        city=req.city,
+        state=req.state,
+        radius_miles=req.radius,
+        equipment_type=req.equipment_type,
+        limit=req.limit,
+    )
+    # Strip internal fields before returning
+    cleaned = [{k: v for k, v in c.items() if not k.startswith("_")} for c in results]
+    return {"count": len(cleaned), "carriers": cleaned}
+
+
+@app.post("/carriers/search-lane")
+def carrier_search_lane(req: LaneSearchRequest):
+    """Search carriers matching a specific lane (origin → destination)."""
+    from app.workflows.carrier_search import search_by_lane
+    results = search_by_lane(
+        origin_city=req.origin_city,
+        origin_state=req.origin_state,
+        dest_city=req.dest_city,
+        dest_state=req.dest_state,
+        equipment_type=req.equipment_type,
+        limit=req.limit,
+    )
+    cleaned = [{k: v for k, v in c.items() if not k.startswith("_")} for c in results]
+    return {"count": len(cleaned), "carriers": cleaned}
+
+
+@app.get("/carriers/{mc_number}")
+def get_single_carrier(mc_number: str):
+    """Get a single carrier profile from Carrier_Master."""
+    from app.sheets import get_carrier
+    carrier = get_carrier(mc_number)
+    if not carrier:
+        raise HTTPException(status_code=404, detail=f"Carrier MC#{mc_number} not found")
+    return carrier
 
 
 # ── Dedicated compliance endpoint ────────────────────────────────────────────

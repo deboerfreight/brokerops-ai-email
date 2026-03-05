@@ -223,6 +223,41 @@ def update_carrier_fields(mc_number: str, updates: dict[str, Any]) -> None:
         update_carrier_field(mc_number, field, value)
 
 
+def insert_carrier(fields: dict[str, Any]) -> None:
+    """Append a new carrier row to Carrier_Master (Sheet1)."""
+    row = [str(fields.get(c, "")) for c in CARRIER_MASTER_COLUMNS]
+    append_row(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:Z", row)
+    logger.info("Inserted carrier MC#%s into Carrier_Master", fields.get("MC_Number"))
+
+
+def search_carriers_in_sheet(
+    *,
+    state: str | None = None,
+    equipment_type: str | None = None,
+    min_score: int | None = None,
+    outreach_status: str | None = None,
+) -> list[dict[str, str]]:
+    """Query existing Carrier_Master rows by filters."""
+    all_carriers = get_all_carriers()
+    results = []
+    for c in all_carriers:
+        if state and c.get("Preferred_Lanes", "") and state.upper() not in c.get("Preferred_Lanes", "").upper():
+            # If Preferred_Lanes is set, check it; otherwise don't filter by state
+            pass  # allow through if no preferred lanes set
+        if equipment_type and equipment_type.upper() not in c.get("Equipment_Type", "").upper():
+            continue
+        if min_score is not None:
+            try:
+                if int(float(c.get("On_Time_Score", "0") or "0")) < min_score:
+                    continue
+            except ValueError:
+                continue
+        if outreach_status and c.get("Onboarding_Status", "") != outreach_status:
+            continue
+        results.append(c)
+    return results
+
+
 def is_carrier_dispatch_eligible(carrier: dict[str, str]) -> bool:
     """Check full dispatch-eligibility rules."""
     settings = get_settings()

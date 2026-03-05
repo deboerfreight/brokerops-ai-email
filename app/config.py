@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # ── Google Doc template ID ───────────────────────────────────
     RATE_CONFIRMATION_TEMPLATE_ID: str = ""
 
+    # ── FMCSA Census API ─────────────────────────────────────────
+    FMCSA_API_KEY: str = ""
+    DEBOER_MC_NUMBER: str = "1712065"
+
     # ── CarrierOK API ────────────────────────────────────────────
     CARRIEROK_API_BASE_URL: str = "https://api.carrierok.com/v1"
 
