@@ -263,20 +263,29 @@ def score_carrier(carrier: dict) -> int:
     Returns -1 for hard-disqualified carriers.
     """
     score = 0
+    name = carrier.get("Legal_Name", "unknown")
 
     # ── Hard disqualifiers ──────────────────────────────────────
     if carrier.get("Authority_Status") != "ACTIVE":
+        logger.debug("Disqualified %s: authority=%s", name, carrier.get("Authority_Status"))
         return -1
     if carrier.get("OOS_Active"):
+        logger.debug("Disqualified %s: OOS active", name)
         return -1
     if carrier.get("Safety_Rating") == "UNSATISFACTORY":
+        logger.debug("Disqualified %s: unsatisfactory safety", name)
         return -1
 
     liability = carrier.get("Insurance_Liability", 0)
     cargo = carrier.get("Insurance_Cargo", 0)
-    if liability < 1_000_000:
+
+    # If insurance data is missing (0), skip the insurance check rather
+    # than disqualifying — the name search endpoint doesn't return it.
+    if liability > 0 and liability < 1_000_000:
+        logger.debug("Disqualified %s: liability=%d", name, liability)
         return -1
-    if cargo < 100_000:
+    if cargo > 0 and cargo < 100_000:
+        logger.debug("Disqualified %s: cargo=%d", name, cargo)
         return -1
 
     # ── Operating Authority (25 pts) ────────────────────────────

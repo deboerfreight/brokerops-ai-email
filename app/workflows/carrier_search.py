@@ -40,20 +40,33 @@ def search_and_score(
         logger.warning("No FMCSA results for %s, %s", city, state)
         return []
 
-    # 2. Filter by equipment type if specified
+    # 2. Fetch full details for each carrier (name search returns limited data)
+    detailed_carriers = []
+    for c in raw_carriers:
+        dot = c.get("DOT_Number", "")
+        if dot:
+            details = get_carrier_details(dot)
+            if details:
+                detailed_carriers.append(details)
+            else:
+                detailed_carriers.append(c)
+        else:
+            detailed_carriers.append(c)
+
+    # 3. Filter by equipment type if specified
     if equipment_type:
         eq_upper = equipment_type.upper()
-        raw_carriers = [
-            c for c in raw_carriers
+        detailed_carriers = [
+            c for c in detailed_carriers
             if eq_upper in (c.get("Equipment_Types", "") or "").upper()
         ]
 
-    # 3. Score and filter out disqualified
+    # 4. Score and filter out disqualified
     scored: list[tuple[int, dict]] = []
-    for c in raw_carriers:
+    for c in detailed_carriers:
         s = score_carrier(c)
         if s < 0:
-            logger.debug("Disqualified: %s (DOT %s)", c.get("Legal_Name"), c.get("DOT_Number"))
+            logger.debug("Disqualified: %s (DOT %s) - score %d", c.get("Legal_Name"), c.get("DOT_Number"), s)
             continue
         c["Carrier_Score"] = s
         scored.append((s, c))
