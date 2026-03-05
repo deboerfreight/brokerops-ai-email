@@ -181,19 +181,20 @@ def get_loads_by_status(status: str) -> list[dict[str, str]]:
 
 CARRIER_MASTER_COLUMNS = [
     "MC_Number", "DOT_Number", "Legal_Name", "DBA_Name",
-    "Primary_Email", "Primary_Phone",
-    "Equipment_Type", "Preferred_Lanes", "Max_Radius_Miles",
+    "Primary_Email", "Contact_Email_Source", "Primary_Phone",
+    "Website", "Equipment_Type", "Preferred_Lanes", "Max_Radius_Miles",
     "Insurance_Expiration", "Auto_Liability_Coverage", "Cargo_Coverage",
     "Authority_Status", "Authority_Verified_Date", "Authority_Source",
     "Compliance_Status",
     "W9_On_File", "Active",
-    "Onboarding_Status", "Last_Load_Date", "On_Time_Score", "Claims_Count",
+    "Onboarding_Status", "Outreach_Method", "Last_Load_Date",
+    "On_Time_Score", "Claims_Count",
     "Internal_Notes",
 ]
 
 
 def get_all_carriers() -> list[dict[str, str]]:
-    rows = read_range(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:W")
+    rows = read_range(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:Z")
     if not rows:
         return []
     headers = rows[0]
