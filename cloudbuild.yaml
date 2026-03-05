@@ -1,20 +1,23 @@
 # Cloud Build configuration for deploying to Cloud Run.
 # Usage: gcloud builds submit --config cloudbuild.yaml .
 
+substitutions:
+  _TAG: ${SHORT_SHA:-latest}
+
 steps:
   # Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:${_TAG}'
       - '.'
 
-  # Push to Container Registry
+  # Push to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:${_TAG}'
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -23,7 +26,7 @@ steps:
       - 'run'
       - 'deploy'
       - 'brokerops-ai'
-      - '--image=gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:${_TAG}'
       - '--region=us-central1'
       - '--platform=managed'
       - '--no-allow-unauthenticated'
@@ -33,4 +36,4 @@ steps:
       - '--service-account=brokerops-sa@$PROJECT_ID.iam.gserviceaccount.com'
 
 images:
-  - 'gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:${_TAG}'
