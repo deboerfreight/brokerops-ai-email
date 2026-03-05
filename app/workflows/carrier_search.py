@@ -13,9 +13,9 @@ from typing import Any, Optional
 from app.fmcsa import search_carriers as fmcsa_search, get_carrier_details, score_carrier
 from app.email_enrichment import enrich_carrier_email
 from app.sheets import (
-    get_carrier,
+    find_carrier,
     insert_carrier,
-    update_carrier_fields,
+    update_carrier_fields_by_key,
     CARRIER_MASTER_COLUMNS,
 )
 
@@ -136,9 +136,10 @@ def _upsert_carrier(carrier: dict) -> dict:
     mc = carrier.get("MC_Number", "")
     dot = carrier.get("DOT_Number", "")
     today = date.today().isoformat()
+    carrier_key = mc or dot  # for logging
 
-    # Check if carrier already exists
-    existing = get_carrier(mc) if mc else None
+    # Check if carrier already exists (by MC first, then DOT)
+    existing = find_carrier(mc, dot)
 
     fields = {
         "MC_Number": mc,
@@ -157,14 +158,14 @@ def _upsert_carrier(carrier: dict) -> dict:
 
     if existing:
         # Update existing carrier with fresh FMCSA data
-        update_carrier_fields(mc, {
+        update_carrier_fields_by_key(mc, dot, {
             "Authority_Status": fields["Authority_Status"],
             "Authority_Verified_Date": today,
             "Equipment_Type": fields["Equipment_Type"],
             "On_Time_Score": fields["On_Time_Score"],
             "Last_Updated": today,
         })
-        logger.info("Updated existing carrier MC#%s", mc)
+        logger.info("Updated existing carrier %s", carrier_key)
         # Merge existing data
         for k, v in existing.items():
             if k not in fields or not fields[k]:
@@ -174,7 +175,7 @@ def _upsert_carrier(carrier: dict) -> dict:
         fields["Created_Date"] = today
         fields["Onboarding_Status"] = "NEW"
         insert_carrier(fields)
-        logger.info("Inserted new carrier MC#%s (%s)", mc, fields["Legal_Name"])
+        logger.info("Inserted new carrier %s (%s)", carrier_key, fields["Legal_Name"])
 
     # Run email enrichment if no email on file
     current_email = fields.get("Primary_Email", "") or (existing or {}).get("Primary_Email", "")
@@ -202,15 +203,15 @@ def _upsert_carrier(carrier: dict) -> dict:
             if website:
                 updates["Website"] = website
 
-            if mc:
-                update_carrier_fields(mc, updates)
+            # Write enrichment to sheet using MC or DOT key
+            update_carrier_fields_by_key(mc, dot, updates)
             fields.update(updates)
 
             logger.info(
-                "Enriched MC#%s: email=%s source=%s",
-                mc, email or "PHONE_ONLY", source,
+                "Enriched %s: email=%s source=%s",
+                carrier_key, email or "PHONE_ONLY", source,
             )
         except Exception as exc:
-            logger.warning("Enrichment failed for MC#%s: %s", mc, exc)
+            logger.warning("Enrichment failed for %s: %s", carrier_key, exc)
 
     return fields

@@ -205,9 +205,29 @@ def get_all_carriers() -> list[dict[str, str]]:
 
 
 def get_carrier(mc_number: str) -> Optional[dict[str, str]]:
+    """Look up a carrier by MC_Number."""
     for c in get_all_carriers():
         if c.get("MC_Number") == mc_number:
             return c
+    return None
+
+
+def get_carrier_by_dot(dot_number: str) -> Optional[dict[str, str]]:
+    """Look up a carrier by DOT_Number (fallback when MC_Number is empty)."""
+    for c in get_all_carriers():
+        if c.get("DOT_Number") == dot_number:
+            return c
+    return None
+
+
+def find_carrier(mc_number: str, dot_number: str) -> Optional[dict[str, str]]:
+    """Find a carrier by MC_Number first, falling back to DOT_Number."""
+    if mc_number:
+        result = get_carrier(mc_number)
+        if result:
+            return result
+    if dot_number:
+        return get_carrier_by_dot(dot_number)
     return None
 
 
@@ -218,9 +238,31 @@ def update_carrier_field(mc_number: str, field: str, value: Any) -> None:
     )
 
 
+def update_carrier_field_by_dot(dot_number: str, field: str, value: Any) -> None:
+    """Update a single cell for a carrier identified by DOT_Number."""
+    _update_row_field(
+        get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1", CARRIER_MASTER_COLUMNS,
+        "DOT_Number", dot_number, field, value
+    )
+
+
 def update_carrier_fields(mc_number: str, updates: dict[str, Any]) -> None:
     for field, value in updates.items():
         update_carrier_field(mc_number, field, value)
+
+
+def update_carrier_fields_by_dot(dot_number: str, updates: dict[str, Any]) -> None:
+    """Update multiple fields for a carrier identified by DOT_Number."""
+    for field, value in updates.items():
+        update_carrier_field_by_dot(dot_number, field, value)
+
+
+def update_carrier_fields_by_key(mc_number: str, dot_number: str, updates: dict[str, Any]) -> None:
+    """Update carrier fields using MC_Number if available, otherwise DOT_Number."""
+    if mc_number:
+        update_carrier_fields(mc_number, updates)
+    elif dot_number:
+        update_carrier_fields_by_dot(dot_number, updates)
 
 
 def insert_carrier(fields: dict[str, Any]) -> None:
