@@ -7,6 +7,7 @@ Endpoints:
   GET  /oauth2callback      – OAuth2 callback
   POST /jobs/poll           – Main polling job (called by Cloud Scheduler)
   POST /jobs/compliance     – Run compliance sync for active-load carriers
+  POST /jobs/discover-carriers – Run carrier discovery for configured markets
 """
 from __future__ import annotations
 
@@ -272,6 +273,83 @@ def compliance_job():
     from app.workflows.compliance_sync import run_for_active_loads
     synced = run_for_active_loads()
     return {"synced_carriers": synced}
+
+
+# ── Carrier discovery endpoint ───────────────────────────────────────────────
+
+class DiscoverCarriersRequest(BaseModel):
+    city: str = "Miami"
+    state: str = "FL"
+    equipment_type: str = "DRY_VAN"
+    limit: int = 10
+
+
+@app.post("/jobs/discover-carriers")
+def discover_carriers(req: DiscoverCarriersRequest | None = None):
+    """Search FMCSA for carriers in a market, score them, and populate Carrier_Master.
+
+    Defaults to Miami, FL general freight (DRY_VAN) if no parameters provided.
+    """
+    from app.workflows.carrier_search import search_and_score
+
+    params = req or DiscoverCarriersRequest()
+    logger.info(
+        "Carrier discovery: %s, %s — %s (limit %d)",
+        params.city, params.state, params.equipment_type, params.limit,
+    )
+
+    results = search_and_score(
+        city=params.city,
+        state=params.state,
+        equipment_type=params.equipment_type,
+        limit=params.limit,
+    )
+
+    cleaned = [
+        {k: v for k, v in c.items() if not k.startswith("_")}
+        for c in results
+    ]
+
+    summary = [
+        {
+            "MC_Number": c.get("MC_Number", ""),
+            "Legal_Name": c.get("Legal_Name", ""),
+            "Equipment_Type": c.get("Equipment_Type", ""),
+            "On_Time_Score": c.get("On_Time_Score", ""),
+            "Authority_Status": c.get("Authority_Status", ""),
+            "Primary_Email": c.get("Primary_Email", ""),
+        }
+        for c in cleaned
+    ]
+
+    logger.info("Carrier discovery complete: %d carriers stored in Carrier_Master", len(cleaned))
+    return {
+        "status": "complete",
+        "market": f"{params.city}, {params.state}",
+        "equipment_type": params.equipment_type,
+        "carriers_found": len(cleaned),
+        "carriers": summary,
+    }
+
+
+@app.on_event("startup")
+async def run_initial_carrier_discovery():
+    """On deploy, automatically discover Miami general freight carriers."""
+    import asyncio
+
+    async def _discover():
+        await asyncio.sleep(5)  # let the app fully start
+        try:
+            from app.workflows.carrier_search import search_and_score
+            logger.info("Startup carrier discovery: Miami, FL — DRY_VAN")
+            results = search_and_score(
+                city="Miami", state="FL", equipment_type="DRY_VAN", limit=10,
+            )
+            logger.info("Startup discovery complete: %d carriers stored", len(results))
+        except Exception:
+            logger.exception("Startup carrier discovery failed")
+
+    asyncio.create_task(_discover())
 
 
 @app.post("/debug/parse-test")
