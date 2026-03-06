@@ -181,20 +181,19 @@ def get_loads_by_status(status: str) -> list[dict[str, str]]:
 
 CARRIER_MASTER_COLUMNS = [
     "MC_Number", "DOT_Number", "Legal_Name", "DBA_Name",
-    "Primary_Email", "Contact_Email_Source", "Primary_Phone",
-    "Website", "Equipment_Type", "Preferred_Lanes", "Max_Radius_Miles",
+    "Primary_Email", "Primary_Phone",
+    "Equipment_Type", "Preferred_Lanes", "Max_Radius_Miles",
     "Insurance_Expiration", "Auto_Liability_Coverage", "Cargo_Coverage",
     "Authority_Status", "Authority_Verified_Date", "Authority_Source",
     "Compliance_Status",
     "W9_On_File", "Active",
-    "Onboarding_Status", "Outreach_Method", "Last_Load_Date",
-    "On_Time_Score", "Claims_Count",
+    "Onboarding_Status", "Last_Load_Date", "On_Time_Score", "Claims_Count",
     "Internal_Notes",
 ]
 
 
 def get_all_carriers() -> list[dict[str, str]]:
-    rows = read_range(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:Z")
+    rows = read_range(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:W")
     if not rows:
         return []
     headers = rows[0]
@@ -205,29 +204,9 @@ def get_all_carriers() -> list[dict[str, str]]:
 
 
 def get_carrier(mc_number: str) -> Optional[dict[str, str]]:
-    """Look up a carrier by MC_Number."""
     for c in get_all_carriers():
         if c.get("MC_Number") == mc_number:
             return c
-    return None
-
-
-def get_carrier_by_dot(dot_number: str) -> Optional[dict[str, str]]:
-    """Look up a carrier by DOT_Number (fallback when MC_Number is empty)."""
-    for c in get_all_carriers():
-        if c.get("DOT_Number") == dot_number:
-            return c
-    return None
-
-
-def find_carrier(mc_number: str, dot_number: str) -> Optional[dict[str, str]]:
-    """Find a carrier by MC_Number first, falling back to DOT_Number."""
-    if mc_number:
-        result = get_carrier(mc_number)
-        if result:
-            return result
-    if dot_number:
-        return get_carrier_by_dot(dot_number)
     return None
 
 
@@ -238,66 +217,9 @@ def update_carrier_field(mc_number: str, field: str, value: Any) -> None:
     )
 
 
-def update_carrier_field_by_dot(dot_number: str, field: str, value: Any) -> None:
-    """Update a single cell for a carrier identified by DOT_Number."""
-    _update_row_field(
-        get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1", CARRIER_MASTER_COLUMNS,
-        "DOT_Number", dot_number, field, value
-    )
-
-
 def update_carrier_fields(mc_number: str, updates: dict[str, Any]) -> None:
     for field, value in updates.items():
         update_carrier_field(mc_number, field, value)
-
-
-def update_carrier_fields_by_dot(dot_number: str, updates: dict[str, Any]) -> None:
-    """Update multiple fields for a carrier identified by DOT_Number."""
-    for field, value in updates.items():
-        update_carrier_field_by_dot(dot_number, field, value)
-
-
-def update_carrier_fields_by_key(mc_number: str, dot_number: str, updates: dict[str, Any]) -> None:
-    """Update carrier fields using MC_Number if available, otherwise DOT_Number."""
-    if mc_number:
-        update_carrier_fields(mc_number, updates)
-    elif dot_number:
-        update_carrier_fields_by_dot(dot_number, updates)
-
-
-def insert_carrier(fields: dict[str, Any]) -> None:
-    """Append a new carrier row to Carrier_Master (Sheet1)."""
-    row = [str(fields.get(c, "")) for c in CARRIER_MASTER_COLUMNS]
-    append_row(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:Z", row)
-    logger.info("Inserted carrier MC#%s into Carrier_Master", fields.get("MC_Number"))
-
-
-def search_carriers_in_sheet(
-    *,
-    state: str | None = None,
-    equipment_type: str | None = None,
-    min_score: int | None = None,
-    outreach_status: str | None = None,
-) -> list[dict[str, str]]:
-    """Query existing Carrier_Master rows by filters."""
-    all_carriers = get_all_carriers()
-    results = []
-    for c in all_carriers:
-        if state and c.get("Preferred_Lanes", "") and state.upper() not in c.get("Preferred_Lanes", "").upper():
-            # If Preferred_Lanes is set, check it; otherwise don't filter by state
-            pass  # allow through if no preferred lanes set
-        if equipment_type and equipment_type.upper() not in c.get("Equipment_Type", "").upper():
-            continue
-        if min_score is not None:
-            try:
-                if int(float(c.get("On_Time_Score", "0") or "0")) < min_score:
-                    continue
-            except ValueError:
-                continue
-        if outreach_status and c.get("Onboarding_Status", "") != outreach_status:
-            continue
-        results.append(c)
-    return results
 
 
 def is_carrier_dispatch_eligible(carrier: dict[str, str]) -> bool:

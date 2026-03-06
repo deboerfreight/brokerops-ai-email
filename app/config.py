@@ -32,10 +32,6 @@ class Settings(BaseSettings):
     # ── Google Doc template ID ───────────────────────────────────
     RATE_CONFIRMATION_TEMPLATE_ID: str = ""
 
-    # ── FMCSA Census API ─────────────────────────────────────────
-    FMCSA_API_KEY: str = ""
-    DEBOER_MC_NUMBER: str = "1712065"
-
     # ── CarrierOK API ────────────────────────────────────────────
     CARRIEROK_API_BASE_URL: str = "https://api.carrierok.com/v1"
 
@@ -56,11 +52,6 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/spreadsheets",
     ]
-
-    # ── Email enrichment ────────────────────────────────────────
-    APOLLO_API_KEY: str = ""                # Apollo.io API key (250 free credits/mo)
-    GOOGLE_CSE_API_KEY: str = ""            # Google Custom Search API key
-    GOOGLE_CSE_CX: str = ""                 # Google Custom Search engine ID
 
     # ── Cloud Run service URL (for OAuth redirect) ───────────────
     SERVICE_URL: str = "http://localhost:8000"
