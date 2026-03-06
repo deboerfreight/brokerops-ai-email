@@ -7,7 +7,6 @@ Endpoints:
   GET  /oauth2callback      – OAuth2 callback
   POST /jobs/poll           – Main polling job (called by Cloud Scheduler)
   POST /jobs/compliance     – Run compliance sync for active-load carriers
-  POST /jobs/discover-carriers – Run carrier discovery for configured markets
 """
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from typing import Any
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse, JSONResponse
-from pydantic import BaseModel
 
 from app.config import get_settings, Settings
 from app.google_auth import build_oauth_flow, exchange_code
@@ -203,68 +201,6 @@ def poll_job():
     return JSONResponse(content=report)
 
 
-# ── Carrier search endpoints ─────────────────────────────────────────────────
-
-
-class CarrierSearchRequest(BaseModel):
-    city: str
-    state: str
-    radius: int = 50
-    equipment_type: str | None = None
-    limit: int = 10
-
-
-class LaneSearchRequest(BaseModel):
-    origin_city: str
-    origin_state: str
-    dest_city: str
-    dest_state: str
-    equipment_type: str | None = None
-    limit: int = 10
-
-
-@app.post("/carriers/search")
-def carrier_search(req: CarrierSearchRequest):
-    """Search FMCSA for carriers, score, enrich emails, store in Carrier_Master."""
-    from app.workflows.carrier_search import search_and_score
-    results = search_and_score(
-        city=req.city,
-        state=req.state,
-        radius_miles=req.radius,
-        equipment_type=req.equipment_type,
-        limit=req.limit,
-    )
-    # Strip internal fields before returning
-    cleaned = [{k: v for k, v in c.items() if not k.startswith("_")} for c in results]
-    return {"count": len(cleaned), "carriers": cleaned}
-
-
-@app.post("/carriers/search-lane")
-def carrier_search_lane(req: LaneSearchRequest):
-    """Search carriers matching a specific lane (origin → destination)."""
-    from app.workflows.carrier_search import search_by_lane
-    results = search_by_lane(
-        origin_city=req.origin_city,
-        origin_state=req.origin_state,
-        dest_city=req.dest_city,
-        dest_state=req.dest_state,
-        equipment_type=req.equipment_type,
-        limit=req.limit,
-    )
-    cleaned = [{k: v for k, v in c.items() if not k.startswith("_")} for c in results]
-    return {"count": len(cleaned), "carriers": cleaned}
-
-
-@app.get("/carriers/{mc_number}")
-def get_single_carrier(mc_number: str):
-    """Get a single carrier profile from Carrier_Master."""
-    from app.sheets import get_carrier
-    carrier = get_carrier(mc_number)
-    if not carrier:
-        raise HTTPException(status_code=404, detail=f"Carrier MC#{mc_number} not found")
-    return carrier
-
-
 # ── Dedicated compliance endpoint ────────────────────────────────────────────
 
 @app.post("/jobs/compliance")
@@ -273,83 +209,6 @@ def compliance_job():
     from app.workflows.compliance_sync import run_for_active_loads
     synced = run_for_active_loads()
     return {"synced_carriers": synced}
-
-
-# ── Carrier discovery endpoint ───────────────────────────────────────────────
-
-class DiscoverCarriersRequest(BaseModel):
-    city: str = "Miami"
-    state: str = "FL"
-    equipment_type: str = "DRY_VAN"
-    limit: int = 10
-
-
-@app.post("/jobs/discover-carriers")
-def discover_carriers(req: DiscoverCarriersRequest | None = None):
-    """Search FMCSA for carriers in a market, score them, and populate Carrier_Master.
-
-    Defaults to Miami, FL general freight (DRY_VAN) if no parameters provided.
-    """
-    from app.workflows.carrier_search import search_and_score
-
-    params = req or DiscoverCarriersRequest()
-    logger.info(
-        "Carrier discovery: %s, %s — %s (limit %d)",
-        params.city, params.state, params.equipment_type, params.limit,
-    )
-
-    results = search_and_score(
-        city=params.city,
-        state=params.state,
-        equipment_type=params.equipment_type,
-        limit=params.limit,
-    )
-
-    cleaned = [
-        {k: v for k, v in c.items() if not k.startswith("_")}
-        for c in results
-    ]
-
-    summary = [
-        {
-            "MC_Number": c.get("MC_Number", ""),
-            "Legal_Name": c.get("Legal_Name", ""),
-            "Equipment_Type": c.get("Equipment_Type", ""),
-            "On_Time_Score": c.get("On_Time_Score", ""),
-            "Authority_Status": c.get("Authority_Status", ""),
-            "Primary_Email": c.get("Primary_Email", ""),
-        }
-        for c in cleaned
-    ]
-
-    logger.info("Carrier discovery complete: %d carriers stored in Carrier_Master", len(cleaned))
-    return {
-        "status": "complete",
-        "market": f"{params.city}, {params.state}",
-        "equipment_type": params.equipment_type,
-        "carriers_found": len(cleaned),
-        "carriers": summary,
-    }
-
-
-@app.on_event("startup")
-async def run_initial_carrier_discovery():
-    """On deploy, automatically discover Miami general freight carriers."""
-    import asyncio
-
-    async def _discover():
-        await asyncio.sleep(5)  # let the app fully start
-        try:
-            from app.workflows.carrier_search import search_and_score
-            logger.info("Startup carrier discovery: Miami, FL — DRY_VAN")
-            results = search_and_score(
-                city="Miami", state="FL", equipment_type="DRY_VAN", limit=10,
-            )
-            logger.info("Startup discovery complete: %d carriers stored", len(results))
-        except Exception:
-            logger.exception("Startup carrier discovery failed")
-
-    asyncio.create_task(_discover())
 
 
 @app.post("/debug/parse-test")
@@ -481,87 +340,6 @@ def ingest_test():
     except Exception as e:
         output["ingestion_error"] = str(e)
         output["ingestion_traceback"] = traceback.format_exc()
-
-    return JSONResponse(content=output)
-
-
-@app.post("/debug/carrier-search")
-def debug_carrier_search():
-    """Debug: step-by-step carrier search diagnostics."""
-    import traceback
-    from app.fmcsa import search_carriers, get_carrier_details, score_carrier, _detect_equipment
-    output: dict[str, Any] = {}
-
-    # Step 1: Raw FMCSA search
-    try:
-        raw = search_carriers(state="FL", city="Miami", equipment_type="REEFER", limit=15)
-        output["step1_raw_count"] = len(raw)
-        output["step1_samples"] = [
-            {
-                "Legal_Name": c.get("Legal_Name"),
-                "DOT_Number": c.get("DOT_Number"),
-                "MC_Number": c.get("MC_Number"),
-                "Authority_Status": c.get("Authority_Status"),
-                "Equipment_Types": c.get("Equipment_Types"),
-                "Insurance_Liability": c.get("Insurance_Liability"),
-                "Insurance_Cargo": c.get("Insurance_Cargo"),
-            }
-            for c in raw[:5]
-        ]
-    except Exception as e:
-        output["step1_error"] = str(e)
-        output["step1_traceback"] = traceback.format_exc()
-        return JSONResponse(content=output)
-
-    # Step 2: Detail fetch for first 3 (now includes cargo + docket endpoints)
-    for c in raw[:3]:
-        dot = c.get("DOT_Number", "")
-        try:
-            details = get_carrier_details(dot)
-            output[f"step2_details_DOT_{dot}"] = {
-                "Legal_Name": details.get("Legal_Name") if details else None,
-                "MC_Number": details.get("MC_Number") if details else None,
-                "Authority_Status": details.get("Authority_Status") if details else None,
-                "Equipment_Types": details.get("Equipment_Types") if details else None,
-                "Insurance_Liability": details.get("Insurance_Liability") if details else None,
-                "Insurance_Cargo": details.get("Insurance_Cargo") if details else None,
-                "Safety_Rating": details.get("Safety_Rating") if details else None,
-                "OOS_Active": details.get("OOS_Active") if details else None,
-                "cargo_carried_parsed": details.get("_raw", {}).get("cargoCarried") if details else None,
-                "cargo_items_raw": details.get("_raw", {}).get("_cargoCarriedRaw") if details else None,
-            } if details else "FAILED"
-        except Exception as e:
-            output[f"step2_details_DOT_{dot}_error"] = str(e)
-
-    # Step 3: Score first 3 (using details if available)
-    for c in raw[:3]:
-        dot = c.get("DOT_Number", "")
-        details = get_carrier_details(dot)
-        carrier = details or c
-        s = score_carrier(carrier)
-        output[f"step3_score_DOT_{dot}"] = {
-            "name": carrier.get("Legal_Name"),
-            "score": s,
-            "authority": carrier.get("Authority_Status"),
-            "liability": carrier.get("Insurance_Liability"),
-            "cargo_ins": carrier.get("Insurance_Cargo"),
-            "equipment": carrier.get("Equipment_Types"),
-            "safety": carrier.get("Safety_Rating"),
-            "oos": carrier.get("OOS_Active"),
-        }
-
-    # Step 4: Equipment type detection test (after cargo data fetch)
-    detailed_equip = {}
-    for c in raw[:5]:
-        dot = c.get("DOT_Number", "")
-        d = get_carrier_details(dot)
-        if d:
-            detailed_equip[dot] = {
-                "name": d.get("Legal_Name"),
-                "equipment": d.get("Equipment_Types"),
-                "cargo_raw": d.get("_raw", {}).get("cargoCarried"),
-            }
-    output["step4_equipment_with_cargo_data"] = detailed_equip
 
     return JSONResponse(content=output)
 
