@@ -40,8 +40,11 @@ def run() -> list[str]:
         return []
 
     # Search for recent inbox emails (last 3 days, unread or read)
-    # Exclude emails sent BY us (from:me) to avoid labeling our own outbound
-    query = "in:inbox newer_than:3d -from:me"
+    # Exclude emails sent BY us (from:me) to avoid labeling our own outbound,
+    # but include emails where we are also the sender (e.g. test emails to self)
+    # by checking if the message is in INBOX (sent-to-self lands in both SENT and INBOX)
+    broker_email = settings.BROKER_EMAIL.lower()
+    query = "in:inbox newer_than:3d"
     page_token = None
     candidates = []
 
@@ -66,7 +69,7 @@ def run() -> list[str]:
         # Fetch message metadata (lightweight – just labels and headers)
         msg = svc.users().messages().get(
             userId="me", id=msg_id, format="metadata",
-            metadataHeaders=["Subject", "From"]
+            metadataHeaders=["Subject", "From", "To"]
         ).execute()
 
         # Skip if already has any OPS/ label
@@ -77,11 +80,20 @@ def run() -> list[str]:
         # This email has no OPS label and hasn't been processed – label it
         subject = ""
         from_addr = ""
+        to_addr = ""
         for h in msg.get("payload", {}).get("headers", []):
             if h["name"] == "Subject":
                 subject = h["value"]
             elif h["name"] == "From":
                 from_addr = h["value"]
+            elif h["name"] == "To":
+                to_addr = h["value"]
+
+        # Skip outbound emails we sent TO others (but allow send-to-self)
+        if broker_email and broker_email in from_addr.lower():
+            if broker_email not in to_addr.lower():
+                logger.debug("Skipping outbound email %s to %s", msg_id, to_addr)
+                continue
 
         # Skip known non-freight senders and subjects
         from_lower = from_addr.lower()
