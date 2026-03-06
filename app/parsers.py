@@ -121,7 +121,7 @@ def _extract(text: str, patterns: list[str], default: str = "") -> str:
 
 def _extract_bool(text: str, keyword: str) -> bool:
     """Check if a keyword is followed by yes/true/required."""
-    m = re.search(rf"{keyword}\s*[:\-]?\s*(yes|true|required|y)", text, re.IGNORECASE)
+    m = re.search(rf"{keyword}[\w\s]*[:\-]\s*(yes|true|required|y)", text, re.IGNORECASE)
     return bool(m)
 
 
