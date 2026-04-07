@@ -63,6 +63,15 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/spreadsheets",
     ]
 
+    # ── Twilio ──────────────────────────────────────────────────
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_PHONE_NUMBER: str = ""
+    TWILIO_PHONE_NUMBER_DIRECT: str = ""
+
+    # ── Retell AI ────────────────────────────────────────────────
+    RETELL_API_KEY: str = ""
+
     # ── Cloud Run service URL (for OAuth redirect) ───────────────
     SERVICE_URL: str = "http://localhost:8000"
 
