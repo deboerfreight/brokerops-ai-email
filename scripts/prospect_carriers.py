@@ -15,7 +15,7 @@ Options:
     --cluster NAME     Run one cluster only (SOUTH_FL, CENTRAL_FL, SOUTHEAST_US, MID_ATLANTIC, NATIONAL)
     --limit N          Max carriers per search target (default: 30)
     --min-score N      Minimum score threshold (default: 40)
-    --min-fleet N      Minimum power units (default: 5)
+    --min-fleet N      Minimum power units (default: 3)
     --source TYPE      Data source: csv or sheets (default: csv)
     --resume FILE      Resume from checkpoint JSON file
     --verbose          Debug logging
@@ -37,10 +37,11 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import get_settings
-from app.fmcsa import search_carriers as fmcsa_search, get_carrier_details, score_carrier
+from app.fmcsa import search_carriers as fmcsa_search, get_carrier_details, score_carrier, classify_onboarding_tier
 from app.email_enrichment import enrich_carrier_email
 from app.sheets import (
     find_carrier,
+    get_all_carriers,
     insert_carrier,
     update_carrier_fields_by_key,
 )
@@ -190,11 +191,15 @@ def build_search_targets(dcs: list[dict[str, str]]) -> dict[str, list[dict[str, 
 def _vet_strict_fallback(carrier: dict) -> tuple[bool, str]:
     """Fallback strict vetting when vet_carrier_strict is not yet available.
 
-    Applies the spec thresholds:
-        - Vehicle OOS rate > 30% = REJECT
-        - Driver OOS rate > 15% = REJECT
+    Hard reject thresholds:
         - Authority must be ACTIVE
         - No OOS active flag
+        - Unsatisfactory safety rating = REJECT
+        - Vehicle OOS rate > 30% = REJECT
+        - Driver OOS rate > 15% = REJECT
+        - Crash rate > 30 per 100 units = REJECT
+        - Fleet size < 3 power units = REJECT
+        - 0 drivers with >0 units (shell/stale) = REJECT
     """
     name = carrier.get("Legal_Name", "unknown")
 
@@ -214,6 +219,21 @@ def _vet_strict_fallback(carrier: dict) -> tuple[bool, str]:
     drv_oos = carrier.get("Driver_OOS_Rate", 0)
     if drv_oos > 15:
         return False, f"driver OOS rate {drv_oos}% > 15%"
+
+    # Fleet size: 3 trucks minimum
+    units = carrier.get("Power_Units", 0)
+    if units > 0 and units < 3:
+        return False, f"fleet size {units} < 3 minimum"
+
+    # Shell / stale carrier: 0 drivers with >0 units
+    drivers = carrier.get("Driver_Count", 0)
+    if units > 0 and drivers == 0:
+        return False, f"0 drivers with {units} units (shell/stale)"
+
+    # Crash rate > 30 per 100 power units
+    crash_rate = carrier.get("Crash_Rate_Per100", 0)
+    if crash_rate and crash_rate > 30:
+        return False, f"crash rate {crash_rate} > 30 per 100 units"
 
     return True, "passed"
 
@@ -371,16 +391,26 @@ def enrich_and_store(
     today = date.today().isoformat()
     carrier_key = mc or dot
 
+    # Classify onboarding tier
+    score = carrier.get("Carrier_Score", 0)
+    tier_info = classify_onboarding_tier(carrier, score)
+    tier = tier_info["tier"]
+    load_cap = tier_info["load_cap"]
+    reqs = ", ".join(tier_info["requirements"])
+    tier_reason = tier_info["reason"]
+
     if dry_run:
         logger.info(
-            "[DRY-RUN] Would store DOT %s (%s) — score=%d, cluster=%s",
-            dot, carrier.get("Legal_Name", "?"), carrier.get("Carrier_Score", 0), cluster_name,
+            "[DRY-RUN] Would store DOT %s (%s) — score=%d, tier=%s, cluster=%s, reason=%s",
+            dot, carrier.get("Legal_Name", "?"), score, tier, cluster_name, tier_reason,
         )
         return carrier
 
     # Skip Sheets API call for duplicate check — seen_dots already handles this.
     # If we get here, the carrier passed the seen_dots filter in search_cluster_carriers.
     existing = None
+
+    tier_note = f"Tier: {tier} | Load cap: ${load_cap:,}" if load_cap else f"Tier: {tier}"
 
     fields: dict[str, Any] = {
         "MC_Number": mc,
@@ -393,10 +423,13 @@ def enrich_and_store(
         "Authority_Status": carrier.get("Authority_Status", ""),
         "Authority_Verified_Date": today,
         "Authority_Source": "FMCSA",
-        "On_Time_Score": str(carrier.get("Carrier_Score", 0)),
+        "On_Time_Score": str(score),
         "Active": "TRUE",
         "Onboarding_Status": "PROSPECT",
-        "Internal_Notes": f"Prospected via vendor DC pipeline ({cluster_name}). Score: {carrier.get('Carrier_Score', 0)}.",
+        "Onboarding_Tier": tier,
+        "Onboarding_Requirements": reqs,
+        "Load_Cap": str(load_cap) if load_cap else "",
+        "Internal_Notes": f"Prospected via vendor DC pipeline ({cluster_name}). Score: {score}. {tier_note}. Reason: {tier_reason}.",
     }
 
     if existing:
@@ -472,8 +505,15 @@ def queue_for_outreach(
     dot = carrier.get("DOT_Number", "")
     carrier_key = mc or dot
 
+    tier = carrier.get("Onboarding_Tier", "STANDARD")
+
+    # MANUAL_REVIEW carriers need Derek's approval before outreach
+    if tier == "MANUAL_REVIEW":
+        logger.info("Holding %s for manual review (score too low) — not queuing for outreach", carrier_key)
+        return
+
     if dry_run:
-        logger.info("[DRY-RUN] Would queue %s for outreach", carrier_key)
+        logger.info("[DRY-RUN] Would queue %s for outreach (tier=%s)", carrier_key, tier)
         return
 
     # Only queue carriers that have an email (skip PHONE_ONLY for now)
@@ -483,7 +523,7 @@ def queue_for_outreach(
         return
 
     update_carrier_fields_by_key(mc, dot, {"Onboarding_Status": "NEW"})
-    logger.info("Queued %s for outreach (PROSPECT → NEW)", carrier_key)
+    logger.info("Queued %s for outreach (PROSPECT → NEW, tier=%s)", carrier_key, tier)
 
 
 # ── Main Pipeline ──────────────────────────────────────────────────────────────
@@ -590,12 +630,11 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
                 target_idx, total_targets, location_str, cluster_name,
             )
 
-            # Tiered thresholds: FL clusters use relaxed fleet/score
-            # (small owner-operators dominate local building supply delivery)
+            # South FL: min 3 trucks, slightly relaxed score
             # Safety vetting (OOS, crash rate) stays strict regardless
             if cluster_name in ("SOUTH_FL", "CENTRAL_FL"):
-                effective_min_score = min(args.min_score, 20)
-                effective_min_fleet = min(args.min_fleet, 1)
+                effective_min_score = min(args.min_score, 25)
+                effective_min_fleet = max(args.min_fleet, 3) if args.min_fleet <= 3 else args.min_fleet
             else:
                 effective_min_score = args.min_score
                 effective_min_fleet = args.min_fleet
@@ -705,8 +744,8 @@ Examples:
         help="Minimum carrier score threshold (default: 40)",
     )
     parser.add_argument(
-        "--min-fleet", type=int, default=5,
-        help="Minimum power units (default: 5)",
+        "--min-fleet", type=int, default=3,
+        help="Minimum power units (default: 3)",
     )
     parser.add_argument(
         "--source", type=str, default="csv", choices=["csv", "sheets"],

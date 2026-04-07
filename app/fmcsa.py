@@ -459,82 +459,153 @@ def score_carrier(carrier: dict) -> int:
     """Score a carrier 0-100 based on the weighted criteria model.
 
     Returns -1 for hard-disqualified carriers.
+
+    Scoring weight priority (highest to lowest):
+        1. Safety record — OOS rates, crash rates, safety rating  (35 pts)
+        2. Equipment verification & fleet size                     (25 pts)
+        3. Carrier age / authority history (forgiving to young)    (20 pts)
+        4. Insurance above minimums (small tiebreaker bonus only)  (10 pts)
+        5. Complaint history                                       (10 pts)
     """
     score = 0
     name = carrier.get("Legal_Name", "unknown")
 
-    # ── Hard disqualifiers ──────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    # HARD DISQUALIFIERS — any of these → immediate reject (-1)
+    # ══════════════════════════════════════════════════════════════
+
+    # Authority must be active
     if carrier.get("Authority_Status") != "ACTIVE":
         logger.debug("Disqualified %s: authority=%s", name, carrier.get("Authority_Status"))
         return -1
+
+    # Not allowed to operate / OOS
     if carrier.get("OOS_Active"):
         logger.debug("Disqualified %s: OOS active", name)
         return -1
+
+    # Unsatisfactory safety rating
     if carrier.get("Safety_Rating") == "UNSATISFACTORY":
         logger.debug("Disqualified %s: unsatisfactory safety", name)
         return -1
 
+    # ── Insurance hard floors ──────────────────────────────────
+    # $1,000,000 liability (BIPD) = minimum floor
+    # $100,000 cargo = minimum floor
+    # If insurance data is missing (0), skip rather than disqualify —
+    # the name search endpoint doesn't always return insurance.
     liability = carrier.get("Insurance_Liability", 0)
     cargo = carrier.get("Insurance_Cargo", 0)
-
-    # If insurance data is missing (0), skip the insurance check rather
-    # than disqualifying — the name search endpoint doesn't return it.
     if liability > 0 and liability < 1_000_000:
-        logger.debug("Disqualified %s: liability=%d", name, liability)
+        logger.debug("Disqualified %s: liability=%d < $1M floor", name, liability)
         return -1
     if cargo > 0 and cargo < 100_000:
-        logger.debug("Disqualified %s: cargo=%d", name, cargo)
+        logger.debug("Disqualified %s: cargo=%d < $100K floor", name, cargo)
         return -1
 
-    # ── Operating Authority (25 pts) ────────────────────────────
-    auth_date_str = carrier.get("Authority_Date", "")
-    auth_age_months = _authority_age_months(auth_date_str)
-    if auth_age_months >= 36:
-        score += 25
-    elif auth_age_months >= 18:
-        score += 15
-    # < 18 months = 0 pts
+    # ── Fleet size hard floor: 3 power units minimum ──────────
+    units = carrier.get("Power_Units", 0)
+    if units > 0 and units < 3:
+        logger.debug("Disqualified %s: fleet size %d < 3 minimum", name, units)
+        return -1
 
-    # ── Insurance — Liability (20 pts) ──────────────────────────
-    if liability >= 2_000_000:
-        score += 20
-    elif liability >= 1_000_000:
-        score += 15
+    # ── Shell / stale carrier: 0 drivers with >0 units ────────
+    drivers = carrier.get("Driver_Count", 0)
+    if units > 0 and drivers == 0:
+        logger.debug("Disqualified %s: 0 drivers with %d units (shell/stale)", name, units)
+        return -1
 
-    # ── Insurance — Cargo (10 pts) ──────────────────────────────
-    if cargo >= 250_000:
-        score += 10
-    elif cargo >= 100_000:
-        score += 7
+    # ── Vehicle OOS rate > 30% ────────────────────────────────
+    veh_oos = carrier.get("Vehicle_OOS_Rate", 0)
+    if veh_oos > 30:
+        logger.debug("Disqualified %s: vehicle OOS rate %.1f%% > 30%%", name, veh_oos)
+        return -1
 
-    # ── Safety Rating (20 pts) ──────────────────────────────────
+    # ── Driver OOS rate > 15% ─────────────────────────────────
+    drv_oos = carrier.get("Driver_OOS_Rate", 0)
+    if drv_oos > 15:
+        logger.debug("Disqualified %s: driver OOS rate %.1f%% > 15%%", name, drv_oos)
+        return -1
+
+    # ── Crash rate > 30 per 100 power units ───────────────────
+    crash_rate = _safe_float(carrier.get("Crash_Rate_Per100", 0))
+    if crash_rate > 30:
+        logger.debug("Disqualified %s: crash rate %.1f > 30 per 100 units", name, crash_rate)
+        return -1
+
+    # ══════════════════════════════════════════════════════════════
+    # SCORING — weighted by priority
+    # ══════════════════════════════════════════════════════════════
+
+    # ── 1. Safety Record (35 pts) ──────────────────────────────
+    # Safety rating component (20 pts)
     safety = carrier.get("Safety_Rating", "NONE")
     if safety == "SATISFACTORY":
         score += 20
     elif safety == "CONDITIONAL":
         score += 10
     elif safety == "NONE":
-        score += 12  # no rating = neutral
+        score += 14  # no rating = neutral, slight benefit of doubt
 
-    veh_oos = carrier.get("Vehicle_OOS_Rate", 0)
-    drv_oos = carrier.get("Driver_OOS_Rate", 0)
-    if veh_oos > 30:
-        score -= 10
-    if drv_oos > 20:
-        score -= 5
-
-    # ── Fleet Size (15 pts) ─────────────────────────────────────
-    units = carrier.get("Power_Units", 0)
-    if units >= 51:
-        score += 15
-    elif units >= 21:
-        score += 13
-    elif units >= 6:
-        score += 10
-    elif units >= 1:
+    # OOS rate component (15 pts) — lower is better
+    if veh_oos <= 5:
+        score += 8
+    elif veh_oos <= 15:
         score += 5
+    elif veh_oos <= 25:
+        score += 2
+    # 25-30 = 0 pts (borderline, already close to hard reject)
 
-    # ── Complaint History (10 pts) ──────────────────────────────
+    if drv_oos <= 5:
+        score += 7
+    elif drv_oos <= 10:
+        score += 4
+    elif drv_oos <= 14:
+        score += 1
+    # 14-15 = 0 pts (borderline)
+
+    # ── 2. Equipment & Fleet Size (25 pts) ─────────────────────
+    if units >= 51:
+        score += 25
+    elif units >= 21:
+        score += 22
+    elif units >= 11:
+        score += 18
+    elif units >= 6:
+        score += 14
+    elif units >= 3:
+        score += 10
+    # < 3 already hard-rejected above
+
+    # ── 3. Authority Age / History (20 pts — forgiving) ────────
+    # Don't auto-reject young authorities; just score them lower.
+    auth_date_str = carrier.get("Authority_Date", "")
+    auth_age_months = _authority_age_months(auth_date_str)
+    if auth_age_months >= 36:
+        score += 20
+    elif auth_age_months >= 18:
+        score += 16
+    elif auth_age_months >= 12:
+        score += 12
+    elif auth_age_months >= 6:
+        score += 8
+    elif auth_age_months > 0:
+        score += 4  # new but not penalized to zero — forgiving
+    # auth_age_months == 0 (unknown) = 0 pts
+
+    # ── 4. Insurance Above Minimums (10 pts — tiebreaker only) ─
+    # $1M/$100K = full credit. Above = small bonus. This is NOT
+    # a major differentiator — just a tiebreaker.
+    if liability >= 1_000_000:
+        score += 5  # meets floor = full base credit
+    if liability >= 2_000_000:
+        score += 2  # small bonus for extra coverage
+    if cargo >= 100_000:
+        score += 2  # meets floor = full base credit
+    if cargo >= 250_000:
+        score += 1  # small bonus for extra coverage
+
+    # ── 5. Complaint History (10 pts) ──────────────────────────
     # FMCSA doesn't reliably return complaints; default to full credit
     complaints = _safe_int(carrier.get("_raw", {}).get("complaintCount", 0))
     if complaints == 0:
@@ -546,6 +617,75 @@ def score_carrier(carrier: dict) -> int:
     # 6+ = 0 pts
 
     return max(score, 0)
+
+
+def classify_onboarding_tier(carrier: dict, score: int) -> dict:
+    """Classify a carrier into an onboarding tier based on score and risk signals.
+
+    Returns dict with:
+        tier: STANDARD | ENHANCED | MANUAL_REVIEW
+        load_cap: max load value for first 3 loads (None = no cap)
+        requirements: list of additional onboarding steps
+        reason: why this tier was assigned
+    """
+    reasons = []
+    requirements = []
+
+    # Authority age risk
+    auth_age = _authority_age_months(carrier.get("Authority_Date", ""))
+    if auth_age < 6:
+        reasons.append(f"authority {auth_age}mo (<6)")
+    elif auth_age < 12:
+        reasons.append(f"authority {auth_age}mo (<12)")
+
+    # Insurance data missing — needs COI verification
+    liability = carrier.get("Insurance_Liability", 0)
+    cargo = carrier.get("Insurance_Cargo", 0)
+    if liability == 0 or cargo == 0:
+        reasons.append("insurance data missing from FMCSA")
+        requirements.append("VERIFY_COI_WITH_INSURER")
+
+    # Inspection confidence — no inspections means unknown risk
+    inspections = _safe_int(carrier.get("_raw", {}).get("inspectionCount", 0))
+    if inspections == 0:
+        reasons.append("no inspection history")
+
+    # Small fleet
+    units = carrier.get("Power_Units", 0)
+    if units <= 5:
+        reasons.append(f"small fleet ({units} units)")
+
+    # Tier assignment
+    if score >= 60 and len(reasons) == 0:
+        return {
+            "tier": "STANDARD",
+            "load_cap": None,
+            "requirements": ["W9", "COI", "AUTHORITY_CHECK", "ACH"],
+            "reason": "score 60+, no risk flags",
+        }
+    elif score >= 35:
+        reqs = ["W9", "COI", "AUTHORITY_CHECK", "ACH", "VERIFY_COI_WITH_INSURER", "BROKER_REFERENCE"]
+        for r in requirements:
+            if r not in reqs:
+                reqs.append(r)
+        return {
+            "tier": "ENHANCED",
+            "load_cap": 15_000,
+            "requirements": reqs,
+            "reason": "; ".join(reasons) if reasons else "score 35-59",
+        }
+    else:
+        reqs = ["W9", "COI", "AUTHORITY_CHECK", "ACH", "VERIFY_COI_WITH_INSURER",
+                "BROKER_REFERENCE", "DEREK_APPROVAL"]
+        for r in requirements:
+            if r not in reqs:
+                reqs.append(r)
+        return {
+            "tier": "MANUAL_REVIEW",
+            "load_cap": 10_000,
+            "requirements": reqs,
+            "reason": "; ".join(reasons) if reasons else "score <35",
+        }
 
 
 def _authority_age_months(date_str: str) -> int:
@@ -589,6 +729,24 @@ def vet_carrier_strict(
         If passed=False, rejection_reason explains which rule triggered the reject.
     """
     name = carrier.get("Legal_Name", "unknown")
+
+    # ── Fleet size < 3 power units ────────────────────────────
+    units = _safe_int(carrier.get("Power_Units", 0))
+    if units > 0 and units < 3:
+        reason = (
+            f"REJECT: Fleet size {units} power units below 3 minimum"
+        )
+        logger.info("Strict vet REJECT %s: %s", name, reason)
+        return False, reason
+
+    # ── Shell / stale carrier: 0 drivers with >0 units ────────
+    drivers = _safe_int(carrier.get("Driver_Count", 0))
+    if units > 0 and drivers == 0:
+        reason = (
+            f"REJECT: 0 drivers with {units} power units (shell/stale carrier)"
+        )
+        logger.info("Strict vet REJECT %s: %s", name, reason)
+        return False, reason
 
     # ── Vehicle OOS rate > 30% ─────────────────────────────────
     veh_oos = _safe_float(carrier.get("Vehicle_OOS_Rate", 0))

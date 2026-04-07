@@ -32,12 +32,22 @@ class Settings(BaseSettings):
     # ── Google Doc template ID ───────────────────────────────────
     RATE_CONFIRMATION_TEMPLATE_ID: str = ""
 
+    # ── FMCSA ────────────────────────────────────────────────────
+    FMCSA_API_KEY: str = ""
+
     # ── CarrierOK API ────────────────────────────────────────────
     CARRIEROK_API_BASE_URL: str = "https://api.carrierok.com/v1"
 
     # ── Gmail ────────────────────────────────────────────────────
     BROKER_EMAIL: str = ""                # the Gmail address used for ops
     GMAIL_USER_ID: str = "me"
+
+    # ── Apollo.io ────────────────────────────────────────────────
+    APOLLO_API_KEY: str = ""
+
+    # ── Google Custom Search Engine ──────────────────────────────
+    GOOGLE_CSE_API_KEY: str = ""
+    GOOGLE_CSE_CX: str = ""
 
     # ── Polling / behaviour ──────────────────────────────────────
     RFQ_BATCH_SIZE: int = 5
