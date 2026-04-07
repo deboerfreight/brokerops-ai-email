@@ -16,3 +16,4 @@ token.json
 *oauth*.json
 client_secret*.json
 .DS_Store
+scripts/.checkpoints/

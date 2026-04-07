@@ -81,7 +81,8 @@ def search_carriers(
             search_terms = ["refrigerated", "cold", "reefer", "frozen", "temp",
                            "freight", "trucking", "transport", "logistics", "express"]
         elif "FLAT" in eq:
-            search_terms = ["flatbed", "steel", "heavy", "haul", "freight",
+            search_terms = ["flatbed", "steel", "heavy", "haul", "building",
+                           "construction", "lumber", "materials", "freight",
                            "trucking", "transport", "logistics", "carrier"]
 
     seen_dots: set[str] = set()
@@ -175,7 +176,136 @@ def get_carrier_details(dot_number: str) -> Optional[dict]:
     except Exception as exc:
         logger.debug("Docket-number fetch failed for DOT %s: %s", dot_number, exc)
 
-    return _normalize_carrier(carrier_data)
+    normalized = _normalize_carrier(carrier_data)
+
+    # Fetch BASICS/safety data (crash counts, inspection details)
+    if normalized:
+        try:
+            basics = get_carrier_basics(dot_number)
+            if basics:
+                normalized["Crash_Total"] = basics.get("Crash_Total", 0)
+                normalized["Fatal_Crash"] = basics.get("Fatal_Crash", 0)
+                normalized["Injury_Crash"] = basics.get("Injury_Crash", 0)
+                normalized["Tow_Crash"] = basics.get("Tow_Crash", 0)
+                normalized["Vehicle_Insp"] = basics.get("Vehicle_Insp", 0)
+                normalized["Vehicle_OOS_Insp"] = basics.get("Vehicle_OOS_Insp", 0)
+                normalized["Driver_Insp"] = basics.get("Driver_Insp", 0)
+                normalized["Driver_OOS_Insp"] = basics.get("Driver_OOS_Insp", 0)
+                # Recompute OOS rates from BASICS if available (more reliable)
+                if basics.get("Vehicle_OOS_Rate") is not None:
+                    normalized["Vehicle_OOS_Rate"] = basics["Vehicle_OOS_Rate"]
+                if basics.get("Driver_OOS_Rate") is not None:
+                    normalized["Driver_OOS_Rate"] = basics["Driver_OOS_Rate"]
+                # Compute crash rate per 100 power units
+                power_units = normalized.get("Power_Units", 0)
+                crash_total = basics.get("Crash_Total", 0)
+                if power_units > 0 and crash_total > 0:
+                    normalized["Crash_Rate_Per100"] = round(
+                        (crash_total / power_units) * 100, 2
+                    )
+                else:
+                    normalized["Crash_Rate_Per100"] = 0.0
+        except Exception as exc:
+            logger.debug("BASICS fetch failed for DOT %s: %s", dot_number, exc)
+
+    return normalized
+
+
+# ── BASICS / Safety Data ───────────────────────────────────────────────────
+
+
+def get_carrier_basics(dot_number: str) -> Optional[dict]:
+    """Fetch BASICS safety data (crash counts, inspection stats) for a carrier.
+
+    Queries: /carriers/{dot}/basics
+    Returns a normalized dict with crash/inspection fields, or None on failure.
+    """
+    url = f"{_BASE_URL}/{dot_number}/basics"
+    try:
+        data = _cached_get(url)
+    except Exception as exc:
+        logger.error("FMCSA BASICS fetch failed for DOT %s: %s", dot_number, exc)
+        return None
+
+    content = data.get("content", data)
+    if isinstance(content, list) and content:
+        content = content[0]
+    if not isinstance(content, dict):
+        return None
+
+    # The BASICS endpoint may nest data under "basics" or return flat
+    basics_data = content.get("basics", content)
+
+    # Some responses return a list of BASIC categories; merge them
+    if isinstance(basics_data, list):
+        merged: dict[str, Any] = {}
+        for item in basics_data:
+            if isinstance(item, dict):
+                merged.update(item)
+        basics_data = merged
+
+    return {
+        "Crash_Total": _safe_int(basics_data.get("crashTotal", 0)),
+        "Fatal_Crash": _safe_int(basics_data.get("fatalCrash", 0)),
+        "Injury_Crash": _safe_int(basics_data.get("injCrash", 0)),
+        "Tow_Crash": _safe_int(basics_data.get("towCrash", 0)),
+        "Vehicle_Insp": _safe_int(basics_data.get("vehicleInsp", 0)),
+        "Vehicle_OOS_Insp": _safe_int(basics_data.get("vehicleOosInsp", 0)),
+        "Driver_Insp": _safe_int(basics_data.get("driverInsp", 0)),
+        "Driver_OOS_Insp": _safe_int(basics_data.get("driverOosInsp", 0)),
+        "Vehicle_OOS_Rate": _safe_float(basics_data.get("vehicleOosRate",
+                                         basics_data.get("vehicleOosRatePercent"))),
+        "Driver_OOS_Rate": _safe_float(basics_data.get("driverOosRate",
+                                        basics_data.get("driverOosRatePercent"))),
+    }
+
+
+def get_carrier_inspections(dot_number: str) -> Optional[dict]:
+    """Fetch crash and inspection summary for a carrier.
+
+    Convenience wrapper that returns crash rate per 100 power units
+    alongside raw counts. Requires carrier details for power unit count.
+
+    Returns dict with keys:
+        crash_total, fatal_crash, injury_crash, tow_crash,
+        vehicle_insp, vehicle_oos_insp, driver_insp, driver_oos_insp,
+        power_units, crash_rate_per_100
+    Or None if data unavailable.
+    """
+    basics = get_carrier_basics(dot_number)
+    if not basics:
+        return None
+
+    # We need power units from the main carrier endpoint
+    carrier_url = f"{_BASE_URL}/{dot_number}"
+    power_units = 0
+    try:
+        carrier_data = _cached_get(carrier_url)
+        content = carrier_data.get("content", carrier_data)
+        if isinstance(content, list) and content:
+            content = content[0]
+        raw = content.get("carrier", content) if isinstance(content, dict) else {}
+        power_units = _safe_int(raw.get("totalPowerUnits", 0))
+    except Exception as exc:
+        logger.debug("Power units fetch failed for DOT %s: %s", dot_number, exc)
+
+    crash_total = basics.get("Crash_Total", 0)
+    crash_rate = 0.0
+    if power_units > 0 and crash_total > 0:
+        crash_rate = round((crash_total / power_units) * 100, 2)
+
+    return {
+        "crash_total": crash_total,
+        "fatal_crash": basics.get("Fatal_Crash", 0),
+        "injury_crash": basics.get("Injury_Crash", 0),
+        "tow_crash": basics.get("Tow_Crash", 0),
+        "vehicle_insp": basics.get("Vehicle_Insp", 0),
+        "vehicle_oos_insp": basics.get("Vehicle_OOS_Insp", 0),
+        "driver_insp": basics.get("Driver_Insp", 0),
+        "driver_oos_insp": basics.get("Driver_OOS_Insp", 0),
+        "power_units": power_units,
+        "crash_rate_per_100": crash_rate,
+    }
 
 
 def _normalize_carrier(raw: dict) -> Optional[dict]:
@@ -430,6 +560,84 @@ def _authority_age_months(date_str: str) -> int:
         except ValueError:
             continue
     return 0
+
+
+# ── Strict Vetting ─────────────────────────────────────────────────────────
+
+
+def vet_carrier_strict(
+    carrier: dict,
+    equipment_types: list[str] | None = None,
+) -> tuple[bool, str]:
+    """Apply hard-reject vetting rules that go beyond score_carrier().
+
+    This runs AFTER score_carrier (which handles authority, insurance, safety
+    rating). It enforces the stricter operational thresholds:
+
+        - Vehicle OOS rate > 30%  →  REJECT
+        - Driver OOS rate  > 15%  →  REJECT
+        - Crash rate > 30 per 100 power units  →  REJECT
+        - Reefer equipment + ANY vehicle maintenance OOS  →  REJECT
+
+    Args:
+        carrier: Normalized carrier dict (from get_carrier_details / _normalize_carrier).
+        equipment_types: Optional list of equipment type strings (e.g. ["REEFER"]).
+                         If None, falls back to carrier["Equipment_Types"].
+
+    Returns:
+        (passed, rejection_reason) – passed=True means carrier cleared strict vetting.
+        If passed=False, rejection_reason explains which rule triggered the reject.
+    """
+    name = carrier.get("Legal_Name", "unknown")
+
+    # ── Vehicle OOS rate > 30% ─────────────────────────────────
+    veh_oos = _safe_float(carrier.get("Vehicle_OOS_Rate", 0))
+    if veh_oos > 30:
+        reason = (
+            f"REJECT: Vehicle OOS rate {veh_oos:.1f}% exceeds 30% threshold"
+        )
+        logger.info("Strict vet REJECT %s: %s", name, reason)
+        return False, reason
+
+    # ── Driver OOS rate > 15% ──────────────────────────────────
+    drv_oos = _safe_float(carrier.get("Driver_OOS_Rate", 0))
+    if drv_oos > 15:
+        reason = (
+            f"REJECT: Driver OOS rate {drv_oos:.1f}% exceeds 15% threshold"
+        )
+        logger.info("Strict vet REJECT %s: %s", name, reason)
+        return False, reason
+
+    # ── Crash rate > 30 per 100 power units ────────────────────
+    crash_rate = _safe_float(carrier.get("Crash_Rate_Per100", 0))
+    if crash_rate > 30:
+        reason = (
+            f"REJECT: Crash rate {crash_rate:.1f} per 100 power units "
+            f"exceeds 30 threshold"
+        )
+        logger.info("Strict vet REJECT %s: %s", name, reason)
+        return False, reason
+
+    # ── Reefer zero tolerance on vehicle maintenance OOS ───────
+    # Determine equipment from explicit param or carrier data
+    equip = equipment_types
+    if equip is None:
+        equip_str = carrier.get("Equipment_Types", "")
+        equip = [e.strip().upper() for e in equip_str.split(",") if e.strip()]
+
+    is_reefer = any("REEFER" in e.upper() for e in (equip or []))
+    if is_reefer:
+        veh_oos_insp = _safe_int(carrier.get("Vehicle_OOS_Insp", 0))
+        if veh_oos_insp > 0:
+            reason = (
+                f"REJECT: Reefer carrier has {veh_oos_insp} vehicle "
+                f"maintenance OOS inspection(s) — zero tolerance for reefer"
+            )
+            logger.info("Strict vet REJECT %s: %s", name, reason)
+            return False, reason
+
+    logger.debug("Strict vet PASSED for %s", name)
+    return True, ""
 
 
 def clear_cache() -> None:

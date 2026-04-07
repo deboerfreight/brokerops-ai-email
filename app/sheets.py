@@ -5,6 +5,7 @@ the idempotency / processed-message store.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -19,9 +20,18 @@ def _svc():
     return get_sheets_service().spreadsheets()
 
 
-def read_range(sheet_id: str, range_: str) -> list[list[str]]:
-    resp = _svc().values().get(spreadsheetId=sheet_id, range=range_).execute()
-    return resp.get("values", [])
+def read_range(sheet_id: str, range_: str, retries: int = 3) -> list[list[str]]:
+    for attempt in range(retries):
+        try:
+            resp = _svc().values().get(spreadsheetId=sheet_id, range=range_).execute()
+            return resp.get("values", [])
+        except Exception as e:
+            if "429" in str(e) and attempt < retries - 1:
+                wait = 2 ** (attempt + 1)
+                logger.warning("Sheets rate limit hit, retrying in %ds...", wait)
+                time.sleep(wait)
+            else:
+                raise
 
 
 def write_range(sheet_id: str, range_: str, values: list[list], value_input: str = "USER_ENTERED"):
@@ -179,22 +189,90 @@ def get_loads_by_status(status: str) -> list[dict[str, str]]:
 
 # ── Carrier_Master ───────────────────────────────────────────────────────────
 
+CARRIER_DB_TAB = "'Carrier Database'"
+CARRIER_DB_RANGE = f"{CARRIER_DB_TAB}!A:AE"
+
+# Actual sheet columns (BrokerOps - Carrier Database)
 CARRIER_MASTER_COLUMNS = [
-    "MC_Number", "DOT_Number", "Legal_Name", "DBA_Name",
-    "Primary_Email", "Contact_Email_Source", "Primary_Phone",
-    "Website", "Equipment_Type", "Preferred_Lanes", "Max_Radius_Miles",
-    "Insurance_Expiration", "Auto_Liability_Coverage", "Cargo_Coverage",
-    "Authority_Status", "Authority_Verified_Date", "Authority_Source",
-    "Compliance_Status",
-    "W9_On_File", "Active",
-    "Onboarding_Status", "Outreach_Method", "Last_Load_Date",
-    "On_Time_Score", "Claims_Count",
-    "Internal_Notes",
+    "Carrier ID", "Status", "Company Name", "MC Number", "DOT Number",
+    "Contact Name", "Contact Email", "Contact Phone",
+    "Dispatcher Name", "Dispatcher Email", "Dispatcher Phone",
+    "Address", "City", "State", "ZIP",
+    "Equipment Types", "Fleet Size",
+    "Insurance Liability", "Insurance Cargo", "Insurance Expiry",
+    "Authority Status", "Authority Date", "Safety Rating",
+    "Has GPS", "GPS Provider",
+    "Compliance Status", "Last Compliance Check",
+    "Score", "Outreach Status", "Onboarded Date", "Notes",
 ]
+
+# Map internal field names (used by fmcsa.py, carrier_search.py) to sheet columns
+_FIELD_MAP = {
+    "MC_Number": "MC Number",
+    "DOT_Number": "DOT Number",
+    "Legal_Name": "Company Name",
+    "DBA_Name": "Company Name",  # fallback
+    "Primary_Email": "Contact Email",
+    "Contact_Email_Source": "Notes",  # append to notes
+    "Primary_Phone": "Contact Phone",
+    "Website": "Notes",  # append to notes
+    "Equipment_Type": "Equipment Types",
+    "Preferred_Lanes": "Notes",  # append to notes
+    "Insurance_Expiration": "Insurance Expiry",
+    "Auto_Liability_Coverage": "Insurance Liability",
+    "Cargo_Coverage": "Insurance Cargo",
+    "Authority_Status": "Authority Status",
+    "Authority_Verified_Date": "Authority Date",
+    "Compliance_Status": "Compliance Status",
+    "Active": "Status",
+    "Onboarding_Status": "Outreach Status",
+    "On_Time_Score": "Score",
+    "Internal_Notes": "Notes",
+    "Power_Units": "Fleet Size",
+    "Safety_Rating": "Safety Rating",
+}
+
+
+def _map_fields_to_sheet(fields: dict[str, Any]) -> dict[str, Any]:
+    """Convert internal field names to actual sheet column names."""
+    mapped = {}
+    notes_parts = []
+
+    # Resolve company name: prefer DBA_Name over Legal_Name if it looks like a real business name
+    legal = fields.get("Legal_Name", "")
+    dba = fields.get("DBA_Name", "")
+    if dba and len(dba) > 2 and dba not in ("--", "0"):
+        mapped["Company Name"] = dba
+    elif legal and len(legal) > 2 and legal not in ("--", "0"):
+        mapped["Company Name"] = legal
+
+    for k, v in fields.items():
+        if k in ("Legal_Name", "DBA_Name"):
+            continue  # handled above
+        sheet_col = _FIELD_MAP.get(k, k)
+        if sheet_col == "Notes" and k != "Internal_Notes":
+            if v:
+                notes_parts.append(f"{k}: {v}")
+        elif sheet_col in CARRIER_MASTER_COLUMNS:
+            mapped[sheet_col] = v
+    # Merge notes
+    if notes_parts:
+        existing_notes = mapped.get("Notes", "")
+        if existing_notes:
+            mapped["Notes"] = f"{existing_notes}; {'; '.join(notes_parts)}"
+        else:
+            mapped["Notes"] = "; ".join(notes_parts)
+    if "Internal_Notes" in fields and fields["Internal_Notes"]:
+        existing = mapped.get("Notes", "")
+        if existing:
+            mapped["Notes"] = f"{existing}; {fields['Internal_Notes']}"
+        else:
+            mapped["Notes"] = fields["Internal_Notes"]
+    return mapped
 
 
 def get_all_carriers() -> list[dict[str, str]]:
-    rows = read_range(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:Z")
+    rows = read_range(get_settings().CARRIER_MASTER_SHEET_ID, CARRIER_DB_RANGE)
     if not rows:
         return []
     headers = rows[0]
@@ -205,23 +283,23 @@ def get_all_carriers() -> list[dict[str, str]]:
 
 
 def get_carrier(mc_number: str) -> Optional[dict[str, str]]:
-    """Look up a carrier by MC_Number."""
+    """Look up a carrier by MC Number."""
     for c in get_all_carriers():
-        if c.get("MC_Number") == mc_number:
+        if c.get("MC Number") == mc_number:
             return c
     return None
 
 
 def get_carrier_by_dot(dot_number: str) -> Optional[dict[str, str]]:
-    """Look up a carrier by DOT_Number (fallback when MC_Number is empty)."""
+    """Look up a carrier by DOT Number (fallback when MC Number is empty)."""
     for c in get_all_carriers():
-        if c.get("DOT_Number") == dot_number:
+        if c.get("DOT Number") == dot_number:
             return c
     return None
 
 
 def find_carrier(mc_number: str, dot_number: str) -> Optional[dict[str, str]]:
-    """Find a carrier by MC_Number first, falling back to DOT_Number."""
+    """Find a carrier by MC Number first, falling back to DOT Number."""
     if mc_number:
         result = get_carrier(mc_number)
         if result:
@@ -232,17 +310,19 @@ def find_carrier(mc_number: str, dot_number: str) -> Optional[dict[str, str]]:
 
 
 def update_carrier_field(mc_number: str, field: str, value: Any) -> None:
+    sheet_field = _FIELD_MAP.get(field, field)
     _update_row_field(
-        get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1", CARRIER_MASTER_COLUMNS,
-        "MC_Number", mc_number, field, value
+        get_settings().CARRIER_MASTER_SHEET_ID, CARRIER_DB_TAB, CARRIER_MASTER_COLUMNS,
+        "MC Number", mc_number, sheet_field, value
     )
 
 
 def update_carrier_field_by_dot(dot_number: str, field: str, value: Any) -> None:
-    """Update a single cell for a carrier identified by DOT_Number."""
+    """Update a single cell for a carrier identified by DOT Number."""
+    sheet_field = _FIELD_MAP.get(field, field)
     _update_row_field(
-        get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1", CARRIER_MASTER_COLUMNS,
-        "DOT_Number", dot_number, field, value
+        get_settings().CARRIER_MASTER_SHEET_ID, CARRIER_DB_TAB, CARRIER_MASTER_COLUMNS,
+        "DOT Number", dot_number, sheet_field, value
     )
 
 
@@ -266,10 +346,17 @@ def update_carrier_fields_by_key(mc_number: str, dot_number: str, updates: dict[
 
 
 def insert_carrier(fields: dict[str, Any]) -> None:
-    """Append a new carrier row to Carrier_Master (Sheet1)."""
-    row = [str(fields.get(c, "")) for c in CARRIER_MASTER_COLUMNS]
-    append_row(get_settings().CARRIER_MASTER_SHEET_ID, "Sheet1!A:Z", row)
-    logger.info("Inserted carrier MC#%s into Carrier_Master", fields.get("MC_Number"))
+    """Append a new carrier row to Carrier Database."""
+    mapped = _map_fields_to_sheet(fields)
+    # Generate Carrier ID from DOT number
+    dot = fields.get("DOT_Number", "") or fields.get("DOT Number", "")
+    if not mapped.get("Carrier ID") and dot:
+        mapped["Carrier ID"] = f"DOT-{dot}"
+    if not mapped.get("Status"):
+        mapped["Status"] = "prospect"
+    row = [str(mapped.get(c, "")) for c in CARRIER_MASTER_COLUMNS]
+    append_row(get_settings().CARRIER_MASTER_SHEET_ID, f"{CARRIER_DB_RANGE}", row)
+    logger.info("Inserted carrier %s into Carrier Database", mapped.get("Company Name", dot))
 
 
 def search_carriers_in_sheet(
@@ -381,7 +468,7 @@ def _update_row_field(
     key_col: str, key_val: str, field: str, value: Any,
 ) -> None:
     """Find a row by key column value and update a specific field."""
-    rows = read_range(sheet_id, f"{tab}!A:Z")
+    rows = read_range(sheet_id, f"{tab}!A:AE")
     if not rows:
         return
     headers = rows[0]

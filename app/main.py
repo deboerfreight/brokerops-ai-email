@@ -142,6 +142,15 @@ def poll_job():
         report["quote_processing_error"] = True
 
     try:
+        # 4b. Outreach reply processing (carrier replies to general outreach)
+        from app.workflows.outreach_reply import run as outreach_reply_run
+        outreach_processed = outreach_reply_run()
+        report["outreach_replies_processed"] = outreach_processed
+    except Exception:
+        logger.exception("Outreach reply processing failed")
+        report["outreach_reply_error"] = True
+
+    try:
         # 5. Onboarding requests
         from app.workflows.onboarding import run_send_requests
         onboard_sent = run_send_requests()
