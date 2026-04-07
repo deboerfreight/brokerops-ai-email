@@ -39,7 +39,7 @@ UNRESPONSIVE_DELAY_DAYS = 7     # days after follow-up #2
 BATCH_LIMIT = 20                 # max emails per run (safety cap)
 
 DEBOER_MC = "1712065"
-SOFIA_PHONE = "305-395-9401"
+SOFIA_PHONE = "305-767-3480"
 
 
 # ── Email body builders ───────────────────────────────────────────────────

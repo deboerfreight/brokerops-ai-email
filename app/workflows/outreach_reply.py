@@ -104,7 +104,7 @@ def _build_sofia_followup(carrier: dict, analysis: dict) -> str:
     greeting_name = contact_name if contact_name else name
 
     broker_company = broker.get("Broker_Company_Name", "deBoer Freight")
-    broker_phone = broker.get("Broker_Company_Phone", "305-395-9401")
+    broker_phone = broker.get("Broker_Company_Phone", "305-767-3480")
 
     body = f"""Hello {greeting_name},
 
@@ -145,7 +145,7 @@ def _build_sofia_decline_followup(carrier: dict, analysis: dict) -> str:
     greeting_name = contact_name if contact_name else name
 
     broker_company = broker.get("Broker_Company_Name", "deBoer Freight")
-    broker_phone = broker.get("Broker_Company_Phone", "305-395-9401")
+    broker_phone = broker.get("Broker_Company_Phone", "305-767-3480")
 
     body = f"""Hello {greeting_name},
 
