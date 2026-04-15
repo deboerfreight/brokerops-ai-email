@@ -57,6 +57,37 @@ def _get_broker_info() -> dict:
     }
 
 
+_ROLE_ACCOUNTS = frozenset({
+    "info", "ops", "dispatch", "contact", "sales", "support", "admin",
+    "hello", "help", "mail", "office", "team", "billing", "accounting",
+    "service", "services", "freight", "loads", "bookings",
+})
+
+
+def _carrier_contact_name(carrier: dict) -> Optional[str]:
+    """Extract a first name from the carrier's contact email local-part.
+
+    Rules:
+      - Extract local-part (before @).
+      - If it's a role account (info, ops, dispatch, etc.) → return None.
+      - If length < 3 → return None.
+      - Otherwise title-case and return.
+    """
+    email = (carrier.get("Contact Email") or carrier.get("Primary_Email") or "").strip().lower()
+    if not email or "@" not in email:
+        return None
+    local = email.split("@")[0]
+    # Strip common separators — take first segment (e.g. "mike.smith" → "mike")
+    for sep in (".", "_", "+", "-"):
+        if sep in local:
+            local = local.split(sep)[0]
+    if not local or len(local) < 3:
+        return None
+    if local in _ROLE_ACCOUNTS:
+        return None
+    return local.title()
+
+
 def _carrier_display_name(carrier: dict) -> Optional[str]:
     """Return the best name to use when greeting a carrier, or None if unknown.
 
@@ -75,10 +106,34 @@ def _carrier_display_name(carrier: dict) -> Optional[str]:
 
 
 def _greeting(name: Optional[str]) -> str:
-    """Render the greeting line, degrading to plain 'Hello,' when name is empty."""
+    """Render the greeting line. Uses contact first name when available."""
     if name:
-        return f"Hello {name},"
-    return "Hello,"
+        return f"Hi {name},"
+    return "Hi,"
+
+
+def _normalize_legal_name_acronym(name: str) -> str:
+    """Uppercase the first word of a legal name if it looks like an acronym.
+
+    Rule: first word is 2-4 characters AND contains no vowels (a/e/i/o/u/y,
+    case-insensitive) → uppercase it. Otherwise leave as-is.
+
+    Examples:
+      Pgt Transport INC  → PGT Transport INC
+      Rdh Trucking INC   → RDH Trucking INC
+      Cts Logistics LLC  → CTS Logistics LLC
+      Apex Trucking LLC  → Apex Trucking LLC  (has vowel 'e')
+      The Hilton Group   → The Hilton Group   (has vowel 'e')
+    """
+    if not name:
+        return name
+    words = name.split()
+    if not words:
+        return name
+    first = words[0]
+    if 2 <= len(first) <= 4 and not re.search(r"[aeiouy]", first, re.IGNORECASE):
+        words[0] = first.upper()
+    return " ".join(words)
 
 
 def _carrier_region(carrier: dict) -> str:
@@ -112,10 +167,11 @@ def _carrier_equipment(carrier: dict) -> str:
 def build_initial_outreach(carrier: dict) -> tuple[str, str]:
     """Return (subject, body) for the initial outreach email."""
     info = _get_broker_info()
+    contact_name = _carrier_contact_name(carrier)
     name = _carrier_display_name(carrier)
     region = _carrier_region(carrier)
     equipment = _carrier_equipment(carrier)
-    greeting = _greeting(name)
+    greeting = _greeting(contact_name)
     _ = region  # region unused in the opener; follow-ups handle region-specific phrasing
 
     subject = f"Freight opportunities - deBoer Freight (MC#{DEBOER_MC})"
@@ -150,9 +206,9 @@ Carrier Relations
 def build_followup_1(carrier: dict) -> str:
     """Return body text for follow-up #1 (sent in-thread)."""
     info = _get_broker_info()
-    name = _carrier_display_name(carrier)
+    contact_name = _carrier_contact_name(carrier)
     region = _carrier_region(carrier)
-    greeting = _greeting(name)
+    greeting = _greeting(contact_name)
 
     if region:
         lede = (
@@ -183,9 +239,9 @@ Carrier Relations
 def build_followup_2(carrier: dict) -> str:
     """Return body text for the final follow-up (sent in-thread)."""
     info = _get_broker_info()
-    name = _carrier_display_name(carrier)
+    contact_name = _carrier_contact_name(carrier)
     region = _carrier_region(carrier)
-    greeting = _greeting(name)
+    greeting = _greeting(contact_name)
 
     if region:
         closer = (

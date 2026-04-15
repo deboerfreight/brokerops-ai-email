@@ -1,13 +1,13 @@
 {# E4 — Docs request. Sent when carrier is classified as `interested`.
    Variables:
-     contact_name : str — carrier contact name (may be blank)
+     contact_name : str — carrier contact name (may be blank); preserve casing
      legal_name   : str — carrier company name
 #}
 
 {% if contact_name %}
-Hi {{ contact_name }} --
+Hi {{ contact_name }},
 {% else %}
-Hi --
+Hi,
 {% endif %}
 
 Good to hear from you. To get you set up in our system, we need four things:
@@ -20,7 +20,7 @@ Good to hear from you. To get you set up in our system, we need four things:
 Reply with those as PDFs and we'll get you active. Once you're in, loads start coming your way immediately.
 
 Thanks,
-Sofia Reyes
-Carrier Ops | deBoer Freight
-866-926-4285 (866-926-HAUL)
-sales@deboerfreight.com
+Derek deBoer
+www.deboerfreight.com
+(305) 767-3480
+MC 1712065

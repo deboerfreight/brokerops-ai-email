@@ -14,12 +14,12 @@ import logging
 import time
 from typing import Any
 
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Header, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse, JSONResponse
 
 from app.config import get_settings, Settings
 from app.google_auth import build_oauth_flow, exchange_code
-from app.task_routes import router as task_router
+from app.task_routes import router as task_router, approval_router, _verify_token
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 
@@ -39,6 +39,11 @@ app = FastAPI(
 
 # ── Scheduled task routes (Cloud Scheduler → Cloud Run) ──────────────────────
 app.include_router(task_router)
+
+# ── Mobile approval routes (signed-URL, --allow-unauthenticated) ─────────────
+# These routes are public (no IAM gate) but each carries its own HMAC-SHA256
+# signed URL token as the authorization proof. See app/signed_urls.py.
+app.include_router(approval_router)
 
 
 def get_config() -> Settings:
@@ -160,7 +165,7 @@ def oauth_callback(code: str, config: Settings = Depends(get_config)):
 # ── Main polling job ─────────────────────────────────────────────────────────
 
 @app.post("/jobs/poll")
-def poll_job():
+def poll_job(x_scheduler_token: str | None = Header(default=None)):
     """
     Single endpoint that runs the full processing cycle:
       1. Ingest new loads (OPS/NEW_LOAD)
@@ -174,6 +179,7 @@ def poll_job():
       9. Generate & send rate confirmations
       10. Run compliance sync for active-load carriers
     """
+    _verify_token(x_scheduler_token)
     start = time.time()
     report: dict[str, Any] = {}
 
@@ -297,16 +303,18 @@ def poll_job():
 # ── Dedicated compliance endpoint ────────────────────────────────────────────
 
 @app.post("/jobs/compliance")
-def compliance_job():
+def compliance_job(x_scheduler_token: str | None = Header(default=None)):
     """Run compliance sync independently."""
+    _verify_token(x_scheduler_token)
     from app.workflows.compliance_sync import run_for_active_loads
     synced = run_for_active_loads()
     return {"synced_carriers": synced}
 
 
 @app.post("/debug/parse-test")
-def parse_test():
+def parse_test(x_scheduler_token: str | None = Header(default=None)):
     """Test the Gemini parser with a sample email body."""
+    _verify_token(x_scheduler_token)
     import traceback
     from app.ai_parser import _call_gemini, classify_email, parse_with_gemini, check_completeness
 
@@ -350,8 +358,9 @@ def parse_test():
 
 
 @app.post("/jobs/ingest-test")
-def ingest_test():
+def ingest_test(x_scheduler_token: str | None = Header(default=None)):
     """Run ONLY load ingestion with verbose output for debugging."""
+    _verify_token(x_scheduler_token)
     import traceback
     from app.gmail import search_messages, _get_label_id, _label_cache, get_gmail_service
     from app.sheets import is_message_processed
@@ -438,8 +447,9 @@ def ingest_test():
 
 
 @app.get("/debug/labels")
-def debug_labels():
+def debug_labels(x_scheduler_token: str | None = Header(default=None)):
     """Debug: show Gmail labels and search results."""
+    _verify_token(x_scheduler_token)
     from app.gmail import get_gmail_service, _get_label_id, search_messages
     from app.sheets import is_message_processed
     svc = get_gmail_service()

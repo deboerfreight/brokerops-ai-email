@@ -191,13 +191,15 @@ def get_loads_by_status(status: str) -> list[dict[str, str]]:
 # ── Carrier_Master ───────────────────────────────────────────────────────────
 
 CARRIER_DB_TAB = "'Carrier Database'"
-# Extended to AS to cover the 7 new outreach-tracking columns added 2026-04-15:
+# Extended to AT to cover all outreach-tracking columns added 2026-04-15:
 # AJ = Outreach_Status, AK = Outreach_E1_SentAt, AL = Outreach_E2_SentAt,
 # AM = Outreach_E3_SentAt, AN = Outreach_Thread_Id,
 # AO = Onboarding_Status, AP = Onboarding_Docs_Received
 # AQ = Outreach_OOO_Return_Date (added 2026-04-15 amendment)
 # AR = Onboarding_E4_ScheduledFor (added 2026-04-15 amendment)
-CARRIER_DB_RANGE = f"{CARRIER_DB_TAB}!A:AR"
+# AS = Onboarding_E4_SentAt (added 2026-04-15 amendment)
+# AT = Outreach_Exclude (added 2026-04-15 fix-3: manual exclusion with reason text)
+CARRIER_DB_RANGE = f"{CARRIER_DB_TAB}!A:AT"
 
 # Actual sheet columns (BrokerOps - Carrier Database)
 CARRIER_MASTER_COLUMNS = [
@@ -253,6 +255,7 @@ _EXTRA_SHEET_COLUMNS = [
     "Outreach_OOO_Return_Date",
     "Onboarding_E4_ScheduledFor",
     "Onboarding_E4_SentAt",
+    "Outreach_Exclude",         # AT — blank=not excluded; any text=excluded (with reason)
 ]
 
 # Map internal field names (used by fmcsa.py, carrier_search.py) to sheet columns
@@ -338,6 +341,7 @@ _READ_ALIAS_MAP = {
     "Outreach_OOO_Return_Date": "Outreach_OOO_Return_Date",
     "Onboarding_E4_ScheduledFor": "Onboarding_E4_ScheduledFor",
     "Onboarding_E4_SentAt": "Onboarding_E4_SentAt",
+    "Outreach_Exclude": "Outreach_Exclude",
 }
 
 
@@ -677,8 +681,8 @@ def _update_row_field(
     key_col: str, key_val: str, field: str, value: Any,
 ) -> None:
     """Find a row by key column value and update a specific field."""
-    # Read wide enough to cover all live columns including outreach extras (AR = col 44)
-    rows = read_range(sheet_id, f"{tab}!A:AR")
+    # Read wide enough to cover all live columns including Outreach_Exclude (AT = col 46)
+    rows = read_range(sheet_id, f"{tab}!A:AT")
     if not rows:
         return
     headers = rows[0]

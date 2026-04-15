@@ -142,7 +142,12 @@ log "Step 3: Building --set-env-vars argument"
 # and is extremely unlikely to appear in any vault secret value.
 
 # Static config — keys that are not secrets
-STATIC_ENV="GCP_PROJECT_ID=${PROJECT}|GCP_REGION=${REGION}|GMAIL_AUTH_MODE=service_account|GMAIL_DELEGATE_EMAIL=sales@deboerfreight.com"
+# SERVICE_URL is required by the mobile approval flow — carrier_outreach.py
+# embeds this in the signed approve/cancel links sent to Derek's phone via
+# Slack. Without it, links render with a placeholder hostname that Safari
+# cannot resolve.
+SERVICE_URL="https://brokerops-ai-oqlgwjslta-uc.a.run.app"
+STATIC_ENV="GCP_PROJECT_ID=${PROJECT}|GCP_REGION=${REGION}|GMAIL_AUTH_MODE=service_account|GMAIL_DELEGATE_EMAIL=sales@deboerfreight.com|SERVICE_URL=${SERVICE_URL}"
 
 ENV_VARS_ARG=$("$PYTHON" - <<PYEOF
 import sys, json
@@ -195,7 +200,18 @@ DEPLOY_CMD=(
   "--region=$REGION"
   "--project=$PROJECT"
   "--platform=managed"
-  "--no-allow-unauthenticated"
+  # CHANGED: --allow-unauthenticated replaces --no-allow-unauthenticated.
+  # WHY: The mobile approval flow requires Derek to tap a link from his phone
+  # browser without gcloud auth or a terminal. IAM-level authentication cannot
+  # be satisfied by a phone browser tap.
+  # MITIGATIONS: Every route guards itself before any state change:
+  #   /tasks/*       — X-Scheduler-Token header check (_verify_token)
+  #   /approve       — HMAC-SHA256 signed URL (token + sig + exp query params)
+  #   /cancel        — HMAC-SHA256 signed URL (same)
+  #   /health, /healthz, /debug/* — read-only diagnostics; no writes
+  # The APPROVAL_SIGNING_SECRET (32-byte random, vault tier: operations) is the
+  # security boundary. An unsigned or expired URL cannot reach any write path.
+  "--allow-unauthenticated"
   "--memory=$MEMORY"
   "--timeout=$TIMEOUT"
   "--max-instances=$MAX_INSTANCES"
@@ -211,7 +227,7 @@ DEPLOY_CMD_DISPLAY=(
   "--region=$REGION"
   "--project=$PROJECT"
   "--platform=managed"
-  "--no-allow-unauthenticated"
+  "--allow-unauthenticated"
   "--memory=$MEMORY"
   "--timeout=$TIMEOUT"
   "--max-instances=$MAX_INSTANCES"

@@ -2,12 +2,10 @@
 Workflow: Carrier Outreach Reply Processing
 
 Handles replies from carriers to general outreach emails (not load-specific RFQs).
-When a carrier responds to Sofia's outreach:
-  1. Parse interest signals, lanes, equipment, rates from the reply.
-  2. Update Carrier_Master with extracted info.
-  3. Send Sofia's follow-up requesting onboarding docs (W-9, COI, Authority Letter, ACH)
-     and lane pricing.
-  4. Label and mark processed.
+When a carrier responds to outreach:
+  1. Classify the reply via reply_classifier.classify_reply().
+  2. Route it (sheet updates, E4 scheduling, Slack) via reply_classifier.route_classified_reply().
+  3. Label and mark processed.
 
 Also handles MDL vendor replies (extension added 2026-04-14 per Bolt brief):
 see run_mdl_vendor_replies() at the bottom of this file. The MDL vendor
@@ -24,13 +22,13 @@ from typing import Optional
 from app.config import get_settings
 from app.gmail import (
     search_messages, get_message, get_body_text, get_header,
-    reply_to_thread, add_label, get_thread,
+    add_label, get_thread,
 )
 from app.google_auth import get_gmail_service, get_sheets_service
 from app.sheets import (
-    get_all_carriers, get_carrier, update_carrier_fields,
-    update_carrier_fields_by_key, is_message_processed,
-    mark_message_processed, get_broker_settings,
+    get_all_carriers,
+    is_message_processed,
+    mark_message_processed,
 )
 
 logger = logging.getLogger("brokerops.workflows.outreach_reply")
@@ -41,52 +39,6 @@ logger = logging.getLogger("brokerops.workflows.outreach_reply")
 # degrades to logger-only when SLACK_WEBHOOK_URL is blank, so this import is
 # safe even without the env var set.
 from app.notifications import notify_slack as _notify_slack  # noqa: E402
-
-
-# ── Gemini-based reply analysis ─────────────────────────────────────────────
-
-_OUTREACH_REPLY_PROMPT = """You are a freight brokerage assistant for De Boer Freight.
-A motor carrier has replied to our outreach email. Analyze their reply and extract:
-
-Return ONLY a JSON object with these fields:
-- "interested": true/false — are they interested in working with us?
-- "lanes": list of strings — any lanes/routes they mention (e.g. "Miami to Orlando", "South FL")
-- "equipment_types": list of strings — equipment they have (e.g. "box truck", "reefer", "flatbed")
-- "rate_info": string — any rate/pricing info they mention, or empty string
-- "contact_name": string — contact person name if mentioned, or empty string
-- "contact_phone": string — phone number if mentioned, or empty string
-- "contact_email": string — alternate email if mentioned, or empty string
-- "fleet_size": string — number of trucks/units if mentioned, or empty string
-- "commodities": string — what they typically haul, or empty string
-- "service_areas": string — geographic areas they serve, or empty string
-- "decline_reason": string — if not interested, why, or empty string
-- "notes": string — any other useful details
-
-No markdown, no backticks, just JSON.
-"""
-
-
-def _analyze_reply(body: str, subject: str, from_addr: str) -> dict:
-    """Use Gemini to analyze a carrier's outreach reply."""
-    from app.ai_parser import _call_gemini, _extract_json
-
-    full_text = (
-        f"From: {from_addr}\n"
-        f"Subject: {subject}\n\n"
-        f"{body}"
-    )
-    prompt = f"{_OUTREACH_REPLY_PROMPT}\n\nCarrier Reply:\n---\n{full_text}\n---\n\nJSON:"
-
-    try:
-        text = _call_gemini(prompt, max_tokens=512)
-        result = _extract_json(text)
-        logger.info("Outreach reply analysis: interested=%s, lanes=%s",
-                     result.get("interested"), result.get("lanes"))
-        return result
-    except Exception as e:
-        logger.error("Outreach reply analysis failed: %s", e)
-        return {"interested": True, "lanes": [], "equipment_types": [],
-                "rate_info": "", "notes": "Analysis failed — treat as interested"}
 
 
 def _extract_sender_email(from_header: str) -> str:
@@ -105,166 +57,17 @@ def _find_carrier_by_email(email: str, carriers: list[dict]) -> Optional[dict]:
     return None
 
 
-def _greeting_from_carrier(carrier: dict) -> str:
-    """Render a safe greeting line from a carrier row.
-
-    Mirrors the pattern in carrier_outreach.py: DBA_Name preferred, Legal_Name
-    title-cased as fallback (to avoid shouted ALL CAPS from FMCSA data), and
-    a plain 'Hello,' when no usable name exists. A single-word fragment is
-    still title-cased so ``TAMPA`` becomes ``Tampa``.
-    """
-    dba = (carrier.get("DBA_Name") or "").strip()
-    if dba:
-        # Title-case multi-word shouted names (e.g. "TAMPA TRANSPORT LLC");
-        # preserve normal mixed-case brands by not forcing .title() if it
-        # already contains lowercase letters.
-        if dba.isupper():
-            name = dba.title()
-        else:
-            name = dba
-        return f"Hello {name},"
-    legal = (carrier.get("Legal_Name") or "").strip()
-    if legal:
-        name = legal.title() if legal.isupper() else legal
-        return f"Hello {name},"
-    return "Hello,"
-
-
-def _build_sofia_followup(carrier: dict, analysis: dict) -> str:
-    """Build Sofia's follow-up email requesting docs and lane pricing."""
-    try:
-        broker = get_broker_settings()
-    except Exception:
-        broker = {}
-
-    contact_name = (analysis.get("contact_name") or "").strip()
-    if contact_name:
-        greeting = f"Hello {contact_name},"
-    else:
-        # Fall back to carrier display name (title-cased to avoid shouted
-        # ALL CAPS DBA/Legal names — same pattern as carrier_outreach.py).
-        greeting = _greeting_from_carrier(carrier)
-
-    broker_company = broker.get("Broker_Company_Name", "deBoer Freight")
-    broker_phone = broker.get("Broker_Company_Phone", "305-767-3480")
-
-    body = f"""{greeting}
-
-Good to hear from you. To get you set up in our system, we need four things:
-
-1. W-9 (signed)
-2. Certificate of Insurance showing auto liability >= $1,000,000 and cargo >= $100,000, with deBoer Freight listed as certificate holder
-3. Copy of your operating authority
-4. ACH / direct deposit info for payment
-
-Reply with those as PDFs and we'll get you active.
-
-If you want to share your rates on regular lanes while you're at it, that helps us start matching you to loads right away.
-
-Thanks,
-Sofia Reyes
-Carrier Ops | deBoer Freight
-{broker_phone}
-sales@deboerfreight.com"""
-    return body
-
-
-def _build_sofia_decline_followup(carrier: dict, analysis: dict) -> str:
-    """Build Sofia's polite follow-up when a carrier declines."""
-    try:
-        broker = get_broker_settings()
-    except Exception:
-        broker = {}
-
-    contact_name = (analysis.get("contact_name") or "").strip()
-    if contact_name:
-        greeting = f"Hello {contact_name},"
-    else:
-        greeting = _greeting_from_carrier(carrier)
-
-    broker_company = broker.get("Broker_Company_Name", "deBoer Freight")
-    broker_phone = broker.get("Broker_Company_Phone", "305-767-3480")
-
-    body = f"""{greeting}
-
-Got it -- thanks for the reply.
-
-If things change on your end, just shoot us a note. We're here.
-
-Thanks,
-Sofia Reyes
-Carrier Ops | deBoer Freight
-{broker_phone}
-sales@deboerfreight.com"""
-    return body
-
-
-def _update_carrier_from_analysis(carrier: dict, analysis: dict) -> None:
-    """Update Carrier_Master fields based on parsed reply data."""
-    mc = carrier.get("MC_Number", "")
-    dot = carrier.get("DOT_Number", "")
-    updates: dict[str, str] = {}
-
-    # Build notes from analysis
-    notes_parts = []
-    if analysis.get("lanes"):
-        notes_parts.append(f"Lanes: {', '.join(analysis['lanes'])}")
-    if analysis.get("commodities"):
-        notes_parts.append(f"Commodities: {analysis['commodities']}")
-    if analysis.get("service_areas"):
-        notes_parts.append(f"Service areas: {analysis['service_areas']}")
-    if analysis.get("fleet_size"):
-        notes_parts.append(f"Fleet: {analysis['fleet_size']}")
-    if analysis.get("rate_info"):
-        notes_parts.append(f"Rates: {analysis['rate_info']}")
-    if analysis.get("decline_reason"):
-        notes_parts.append(f"Declined: {analysis['decline_reason']}")
-    if analysis.get("notes"):
-        notes_parts.append(analysis["notes"])
-
-    if notes_parts:
-        existing_notes = carrier.get("Internal_Notes", "")
-        new_notes = f"[Outreach reply {date.today().isoformat()}] {'; '.join(notes_parts)}"
-        if existing_notes:
-            updates["Internal_Notes"] = f"{existing_notes} | {new_notes}"
-        else:
-            updates["Internal_Notes"] = new_notes
-
-    # Update contact info if we got better data
-    if analysis.get("contact_phone") and not carrier.get("Primary_Phone"):
-        updates["Primary_Phone"] = analysis["contact_phone"]
-
-    # Update equipment types if carrier self-reported
-    if analysis.get("equipment_types"):
-        equip_str = ", ".join(analysis["equipment_types"]).upper()
-        updates["Equipment_Type"] = equip_str
-
-    # Update preferred lanes
-    if analysis.get("lanes"):
-        existing_lanes = carrier.get("Preferred_Lanes", "")
-        new_lanes = ", ".join(analysis["lanes"])
-        if existing_lanes:
-            updates["Preferred_Lanes"] = f"{existing_lanes}, {new_lanes}"
-        else:
-            updates["Preferred_Lanes"] = new_lanes
-
-    # Mark onboarding status
-    if analysis.get("interested"):
-        updates["Onboarding_Status"] = "OUTREACH_INTERESTED"
-    else:
-        updates["Onboarding_Status"] = "OUTREACH_DECLINED"
-
-    if updates:
-        update_carrier_fields_by_key(mc, dot, updates)
-        logger.info("Updated carrier MC=%s DOT=%s with outreach reply data: %s",
-                     mc, dot, list(updates.keys()))
-
-
 def run() -> list[str]:
     """
     Process carrier replies to outreach emails (labeled OPS/OUTREACH_REPLY).
+
+    Classification and routing are delegated entirely to reply_classifier —
+    the canonical path. Sofia handlers have been removed.
+
     Returns list of message IDs that were processed.
     """
+    from app.reply_classifier import classify_reply, route_classified_reply
+
     settings = get_settings()
     processed: list[str] = []
 
@@ -290,7 +93,6 @@ def run() -> list[str]:
             subject = get_header(msg, "Subject")
             body = get_body_text(msg)
             sender_email = _extract_sender_email(from_addr)
-            thread_id = msg.get("threadId", "")
 
             # Skip our own messages
             if sender_email == settings.BROKER_EMAIL.lower():
@@ -304,47 +106,26 @@ def run() -> list[str]:
                 mark_message_processed(msg_id, f"unknown_carrier_outreach:{sender_email}")
                 continue
 
+            dot = carrier.get("DOT_Number", "")
             mc = carrier.get("MC_Number", "")
-            logger.info("Processing outreach reply from %s (MC=%s): '%s'",
-                         sender_email, mc, subject)
+            logger.info(
+                "Processing outreach reply from %s (DOT=%s MC=%s): '%s'",
+                sender_email, dot, mc, subject,
+            )
 
-            # Analyze the reply with Gemini
-            analysis = _analyze_reply(body, subject, from_addr)
+            # Classify and route via the canonical reply_classifier path
+            classified = classify_reply(subject=subject, body=body, sender=from_addr)
+            logger.info(
+                "Classified reply DOT=%s as category=%s confidence=%s",
+                dot, classified.category, classified.confidence,
+            )
+            # Fix 6: pass reply_body so draft flow can reference the original reply
+            route_classified_reply(classified, carrier_dot=dot, reply_body=body)
 
-            # Update carrier record
-            _update_carrier_from_analysis(carrier, analysis)
-
-            # Send Sofia's follow-up — gated by OUTREACH_AUTO_REPLY_ENABLED
-            auto_reply_enabled = get_settings().OUTREACH_AUTO_REPLY_ENABLED
-            if analysis.get("interested", True):
-                if auto_reply_enabled:
-                    reply_body = _build_sofia_followup(carrier, analysis)
-                    reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-                    reply_to_thread(
-                        thread_id=thread_id,
-                        to=sender_email,
-                        subject=reply_subject,
-                        body_text=reply_body,
-                    )
-                    add_label(msg_id, "OPS/ONBOARDING")
-                    logger.info("Sofia sent onboarding follow-up to %s (MC=%s)", sender_email, mc)
-                else:
-                    logger.info("AUTO-REPLY DISABLED: would have sent Sofia onboarding follow-up to %s (MC=%s)", sender_email, mc)
-            else:
-                if auto_reply_enabled:
-                    reply_body = _build_sofia_decline_followup(carrier, analysis)
-                    reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-                    reply_to_thread(
-                        thread_id=thread_id,
-                        to=sender_email,
-                        subject=reply_subject,
-                        body_text=reply_body,
-                    )
-                    logger.info("Sofia sent decline follow-up to %s (MC=%s)", sender_email, mc)
-                else:
-                    logger.info("AUTO-REPLY DISABLED: would have sent Sofia decline follow-up to %s (MC=%s)", sender_email, mc)
-
-            mark_message_processed(msg_id, f"outreach_reply:{mc}:interested={analysis.get('interested')}")
+            mark_message_processed(
+                msg_id,
+                f"outreach_reply:{dot}:category={classified.category}",
+            )
             processed.append(msg_id)
 
         except Exception:

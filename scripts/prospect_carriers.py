@@ -81,7 +81,8 @@ EXCLUDED_SERVICE_TYPE_PATTERNS = re.compile(
         recovery                        |  # vehicle recovery
         passenger                       |  # passenger transport
         bus\s+(?:lines?|co(?:mpany)?|services?)  |  # bus lines / bus co.
-        coach                           |  # coach transport
+        coach(?:es)?                    |  # coach / coaches transport
+        motorcoach(?:es)?               |  # motorcoach
         shuttle                         |  # shuttle service
         tours?                          |  # tours
         charter                         |  # charter
@@ -110,11 +111,41 @@ EXCLUDED_SERVICE_TYPE_PATTERNS = re.compile(
         equine                          |  # equine / horse
         van\s+lines                     |  # van lines (moving)
         movers?                         |  # movers
-        moving                             # moving company
+        moving                          |  # moving company
+        \btanker\b                      |  # tanker operator (word-boundary: excludes "Tank Creek" location names)
+        tank\s+lines?                   |  # tank line / tank lines (e.g. "Volume Tank Lines")
+        bulk\s+liquid                   |  # bulk liquid carriers
+        petroleum\s+transport           |  # dedicated petroleum haulers
+        chemical\s+transport               # dedicated chemical haulers
+        # NOTE: do NOT add bare "tank" — too broad; "Tank Creek Trucking" is a location name.
+        # NOTE: do NOT add "fuel" — fuel/propane carriers are tagged Fuel service type, not denied.
     )\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+
+
+def exclude_by_equipment(carrier: dict) -> bool:
+    """Return True if carrier should be excluded due to TANKER equipment bucket.
+
+    Rule (2026-04-15): if ANY equipment bucket is TANKER the carrier is excluded
+    from outreach regardless of other buckets (dry van, flatbed, etc.).
+    Rationale: tanker carriers prioritize tanker loads; not high-fit for
+    Manley's dry/flatbed lanes. Applies to both BrokerOps and MDL outreach.
+
+    Accepts the carrier dict using either Equipment_Type (sheet column name) or
+    equipment_types (JSON preview key).
+    """
+    eq_raw = (
+        carrier.get("Equipment_Type")
+        or carrier.get("Equipment Types")
+        or carrier.get("equipment_types")
+        or carrier.get("Equipment_Types")
+        or ""
+    )
+    buckets = [b.strip().upper() for b in str(eq_raw).split(",") if b.strip()]
+    return "TANKER" in buckets
+
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 

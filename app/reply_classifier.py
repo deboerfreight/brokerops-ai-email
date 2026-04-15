@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -79,8 +80,9 @@ _OOO_RE = re.compile(
 _UNSUB_RE = re.compile(
     r"\b(unsubscribe|remove (me|my email)|stop (emailing|contacting)|"
     r"do not (email|contact)|opt[ -]?out|not interested|no thank[s]?|"
-    r"please remove|take me off)\b",
-    re.I,
+    r"please remove|take me off)\b"
+    r"|^\s*stop\s*$",  # bare "STOP" reply per CAN-SPAM footer instruction
+    re.I | re.MULTILINE,
 )
 _BOUNCE_SENDER_RE = re.compile(
     r"(mailer-daemon|postmaster|delivery.*failure|mail.*delivery.*subsystem|"
@@ -295,6 +297,109 @@ def classify_reply(subject: str, body: str, sender: str) -> ClassifiedReply:
     )
 
 
+# ── Reply draft generation (Fix 6, 2026-04-15) ───────────────────────────────
+
+_REPLY_DRAFT_PROMPT = """\
+You are Derek deBoer, owner/operator of deBoer Freight, a small licensed freight brokerage in Key West, Florida. You specialize in moving commodities and building materials in and out of Florida.
+
+A carrier just replied to your cold outreach email. Draft a SHORT, natural, professional response.
+
+Carrier: {legal_name} (DOT {dot}), based in {city}, {state}
+Their equipment: {equipment_types}
+
+The original reply they sent you:
+---
+{reply_body}
+---
+
+Draft your response as plain text (no subject line -- it's in-thread).
+
+Rules:
+- 3-6 sentences max. Short.
+- Match their tone. Formal if they're formal, casual if they're casual.
+- If they asked a specific question, answer it directly
+- If they expressed interest, briefly outline next steps: you'll need W-9, COI ($1M auto / $100K cargo), operating authority, and ACH info to get them set up
+- If they mentioned specific lanes or equipment, acknowledge what they said
+- Do NOT use "I hope this email finds you well", "Best regards", "Sincerely", "Please don't hesitate", or any other AI-sounding phrase
+- Sign off with "Thanks, Derek" on its own line. No title, no footer, no signature block -- just "Thanks, Derek"
+- No em-dashes. Use periods and commas.
+- Sound like a human wrote it in 30 seconds\
+"""
+
+
+def _generate_reply_draft(carrier: dict, reply_body: str) -> str:
+    """Call Claude (via existing ai_parser Gemini interface) to draft a reply.
+
+    Returns the draft as a plain-text string. On failure, returns a minimal
+    fallback so the approval flow always has something to offer Derek.
+    """
+    legal_name = (
+        carrier.get("DBA_Name") or carrier.get("Legal_Name") or carrier.get("Company Name") or ""
+    ).strip()
+    dot = (carrier.get("DOT_Number") or carrier.get("DOT Number") or "").strip()
+    city = (carrier.get("City") or "").strip()
+    state = (carrier.get("State") or "").strip()
+    eq = (carrier.get("Equipment_Type") or carrier.get("Equipment Types") or "").strip()
+
+    prompt = _REPLY_DRAFT_PROMPT.format(
+        legal_name=legal_name or "this carrier",
+        dot=dot or "unknown",
+        city=city or "unknown",
+        state=state or "unknown",
+        equipment_types=eq or "not specified",
+        reply_body=reply_body[:1500],
+    )
+
+    try:
+        from app.ai_parser import _call_gemini
+        draft = _call_gemini(prompt, max_tokens=512)
+        draft = draft.strip()
+        if draft:
+            return draft
+    except Exception as e:
+        logger.warning("_generate_reply_draft: LLM call failed: %s -- using fallback", e)
+
+    # Minimal fallback if LLM unavailable
+    contact = (carrier.get("Contact Name") or "").strip()
+    greeting = f"Hi {contact}," if contact else "Hi,"
+    return (
+        f"{greeting}\n\n"
+        f"Thanks for getting back to me. To get you set up in our system, we'll need a W-9, "
+        f"COI ($1M auto / $100K cargo), copy of your operating authority, and ACH info. "
+        f"Reply with those as PDFs and we'll get you active.\n\n"
+        f"Thanks, Derek"
+    )
+
+
+def _post_draft_approval_slack(
+    carrier: dict,
+    reply_body: str,
+    classified: "ClassifiedReply",
+    draft: str,
+    draft_id: str,
+    approve_url: str,
+) -> None:
+    """Post a Slack DM to Derek with the draft and approval tap-link."""
+    legal_name = (
+        carrier.get("DBA_Name") or carrier.get("Legal_Name") or carrier.get("Company Name") or "unknown"
+    ).strip()
+    dot = (carrier.get("DOT_Number") or carrier.get("DOT Number") or "").strip()
+    state = (carrier.get("State") or "").strip()
+
+    reply_excerpt = reply_body[:300].replace("\n", " ").strip()
+    draft_preview = draft[:400].strip()
+
+    msg = (
+        f"*Carrier reply — {legal_name} (DOT {dot}, {state})*\n"
+        f"Category: `{classified.category}` | Confidence: `{classified.confidence}`\n\n"
+        f"*Their reply:*\n> {reply_excerpt}\n\n"
+        f"*Draft response:*\n```{draft_preview}```\n\n"
+        f"<{approve_url}|Tap to review, edit, and send>\n"
+        f"_(24h to action)_"
+    )
+    notify_slack(msg)
+
+
 # ── Action router ─────────────────────────────────────────────────────────────
 
 def _get_carrier_summary(dot: str) -> str:
@@ -349,7 +454,7 @@ def _send_docs_request(dot: str) -> None:
         contact_name = ""
         cn = (c.get("Contact Name") or "").strip()
         if cn:
-            contact_name = cn.title() if cn.isupper() else cn
+            contact_name = cn  # preserve original casing
         legal_name = (c.get("DBA_Name") or c.get("Legal_Name") or c.get("Company Name") or "").strip()
 
         body = _render_e4_body(contact_name, legal_name)
@@ -368,7 +473,7 @@ def _send_docs_request(dot: str) -> None:
 
 
 def _render_e4_body(contact_name: str, legal_name: str) -> str:
-    greeting = f"Hi {contact_name} --" if contact_name else "Hi --"
+    greeting = f"Hi {contact_name}," if contact_name else "Hi,"
     return f"""{greeting}
 
 Good to hear from you. To get you set up in our system, we need four things:
@@ -381,10 +486,10 @@ Good to hear from you. To get you set up in our system, we need four things:
 Reply with those as PDFs and we'll get you active. Once you're in, loads start coming your way immediately.
 
 Thanks,
-Sofia Reyes
-Carrier Ops | deBoer Freight
-866-926-4285 (866-926-HAUL)
-sales@deboerfreight.com"""
+Derek deBoer
+www.deboerfreight.com
+(305) 767-3480
+MC 1712065"""
 
 
 def _canned_reply_for_simple_question(question_text: str) -> Optional[str]:
@@ -409,8 +514,89 @@ def _canned_reply_for_simple_question(question_text: str) -> Optional[str]:
     return None  # escalate to Derek
 
 
-def route_classified_reply(classified: ClassifiedReply, carrier_dot: str) -> None:
+def _generate_and_post_draft(
+    carrier_dot: str,
+    reply_body: str,
+    classified: "ClassifiedReply",
+) -> None:
+    """Generate a Claude draft, store in GCS, post Slack DM with approval link.
+
+    Called for: interested, need_more_info, redirect categories.
+    Safe to call in test mode — GCS and Slack calls can be patched.
+    """
+    import os
+
+    try:
+        from app.sheets import get_carrier_by_dot
+        carrier = get_carrier_by_dot(carrier_dot) or {}
+    except Exception as e:
+        logger.error("_generate_and_post_draft: could not load carrier DOT=%s: %s", carrier_dot, e)
+        carrier = {}
+
+    # Generate draft
+    draft_text = _generate_reply_draft(carrier, reply_body)
+
+    # Store in GCS
+    draft_id = str(uuid.uuid4())
+    draft_data = {
+        "draft_id": draft_id,
+        "carrier_dot": carrier_dot,
+        "carrier_name": (
+            carrier.get("DBA_Name") or carrier.get("Legal_Name") or carrier.get("Company Name") or ""
+        ),
+        "original_reply": reply_body,
+        "draft": draft_text,
+        "thread_id": (carrier.get("Outreach_Thread_Id") or "").strip(),
+        "contact_email": (carrier.get("Contact Email") or carrier.get("Primary_Email") or "").strip(),
+        "category": classified.category,
+        "confidence": classified.confidence,
+        "used": False,
+        "sent": False,
+    }
+
+    gcs_uri = ""
+    try:
+        from app.reply_draft_store import store_reply_draft
+        gcs_uri = store_reply_draft(draft_id, draft_data)
+        logger.info("Reply draft stored: draft_id=%s uri=%s", draft_id, gcs_uri)
+    except Exception as e:
+        logger.error("_generate_and_post_draft: GCS write failed for DOT=%s: %s", carrier_dot, e)
+
+    # Build approval URL (24h TTL)
+    approve_url = ""
+    try:
+        secret = os.environ.get("APPROVAL_SIGNING_SECRET", "")
+        service_url = get_settings().SERVICE_URL
+        if secret:
+            from app.signed_urls import sign_token
+            signed = sign_token({"batch_id": draft_id}, secret, ttl_seconds=86400)  # 24h
+            approve_url = (
+                f"{service_url}/reply-approve"
+                f"?token={signed['token']}"
+                f"&sig={signed['sig']}"
+                f"&exp={signed['exp']}"
+            )
+    except Exception as e:
+        logger.error("_generate_and_post_draft: URL signing failed for DOT=%s: %s", carrier_dot, e)
+        approve_url = f"(draft_id={draft_id} — check GCS)"
+
+    # Post Slack DM
+    try:
+        _post_draft_approval_slack(carrier, reply_body, classified, draft_text, draft_id, approve_url)
+    except Exception as e:
+        logger.error("_generate_and_post_draft: Slack post failed for DOT=%s: %s", carrier_dot, e)
+
+
+def route_classified_reply(
+    classified: ClassifiedReply,
+    carrier_dot: str,
+    reply_body: str = "",
+) -> None:
     """Route a classified reply to the appropriate action.
+
+    Fix 6 (2026-04-15): interested / need_more_info / redirect categories now
+    generate a Claude draft and post a Slack DM with an approval tap-link.
+    The old auto-E4 path (Amendment 2) is DISABLED -- see process_scheduled_doc_requests.
 
     Actions never fire sends/writes directly -- they call helpers that are
     themselves gated by OUTREACH_AUTO_REPLY_ENABLED or remain log-only.
@@ -425,28 +611,14 @@ def route_classified_reply(classified: ClassifiedReply, carrier_dot: str) -> Non
     )
 
     if cat == CATEGORY_INTERESTED:
-        # Amendment 2: auto-schedule E4 5 min out; no approval gate.
-        scheduled_for = datetime.utcnow() + timedelta(minutes=5)
+        # Fix 6: generate a Claude draft + post for Derek's approval instead of auto-E4.
         _update_carrier_outreach_status(
             carrier_dot,
             outreach_status="replied_interested",
-            onboarding_status="docs_request_scheduled",
+            onboarding_status="replied_interested",
         )
-        try:
-            from app.sheets import update_carrier_fields_by_dot
-            update_carrier_fields_by_dot(carrier_dot, {
-                "Onboarding_E4_ScheduledFor": scheduled_for.isoformat(),
-            })
-        except Exception as e:
-            logger.error("Failed to write Onboarding_E4_ScheduledFor for DOT=%s: %s", carrier_dot, e)
-        notify_slack(
-            f"Carrier {summary} replied interested -- E4 scheduled for 5m "
-            f"({scheduled_for.strftime('%H:%M:%S')} UTC). No action needed."
-        )
-        logger.info(
-            "DOT=%s interested reply -- E4 scheduled at %s",
-            carrier_dot, scheduled_for.isoformat(),
-        )
+        _generate_and_post_draft(carrier_dot, reply_body, classified)
+        logger.info("DOT=%s interested reply -- draft generated, pending Derek approval", carrier_dot)
 
     elif cat == CATEGORY_NOT_INTERESTED:
         _update_carrier_outreach_status(
@@ -454,34 +626,15 @@ def route_classified_reply(classified: ClassifiedReply, carrier_dot: str) -> Non
             outreach_status="replied_not_interested",
             onboarding_status="rejected",
         )
+        # Fix 6: FYI-only Slack DM; no draft, no auto-reply.
+        notify_slack(f"FYI: {summary} marked not interested. No action needed.")
         logger.info("DOT=%s marked not_interested -- permanent exclusion", carrier_dot)
-        # No reply sent.
 
     elif cat == CATEGORY_NEED_MORE_INFO:
-        question = classified.extracted_data.get("question_text", classified.raw_subject)
-        canned = _canned_reply_for_simple_question(question)
-        if canned and get_settings().OUTREACH_AUTO_REPLY_ENABLED:
-            # Send canned reply in-thread
-            try:
-                from app.sheets import get_carrier_by_dot
-                from app.gmail import reply_to_thread
-                c = get_carrier_by_dot(carrier_dot)
-                if c:
-                    email = (c.get("Contact Email") or c.get("Primary_Email") or "").strip()
-                    thread_id = (c.get("Outreach_Thread_Id") or "").strip()
-                    subject = f"Re: {classified.raw_subject}"
-                    if thread_id:
-                        reply_to_thread(thread_id=thread_id, to=email, subject=subject, body_text=canned)
-                        logger.info("Sent canned reply to DOT=%s", carrier_dot)
-            except Exception as e:
-                logger.error("Canned reply failed for DOT=%s: %s", carrier_dot, e)
-        else:
-            notify_slack(
-                f"Carrier question (needs Derek review): {summary}\n"
-                f"Question: {question}\n"
-                f"Action: manual reply required"
-            )
+        # Fix 6: draft instead of canned auto-reply
         _update_carrier_outreach_status(carrier_dot, outreach_status="replied_interested")
+        _generate_and_post_draft(carrier_dot, reply_body, classified)
+        logger.info("DOT=%s need_more_info -- draft generated, pending Derek approval", carrier_dot)
 
     elif cat == CATEGORY_OOO:
         return_date = classified.extracted_data.get("return_date", "")
@@ -611,107 +764,21 @@ def route_classified_reply(classified: ClassifiedReply, carrier_dot: str) -> Non
             )
 
 
-# ── Scheduled doc-request processor (Amendment 2) ────────────────────────────
+# ── Scheduled doc-request processor (DISABLED — Fix 6, 2026-04-15) ───────────
 
 def process_scheduled_doc_requests() -> int:
-    """Fire E4 docs-request emails for any carriers whose scheduled send time has passed.
+    """DISABLED: was Amendment 2 auto-E4 scheduler.
 
-    Called by the reply poller on every tick (every ~5 min). Finds rows where
-    Onboarding_Status == 'docs_request_scheduled' AND Onboarding_E4_ScheduledFor <= now(),
-    sends E4 in-thread, writes Onboarding_Status=docs_requested and E4_SentAt.
+    Fix 6 (2026-04-15): the auto-E4 path is superseded by the draft-and-approve
+    flow. Interested carrier replies now generate a Claude draft and route to
+    Derek for approval via /reply-approve instead of auto-firing E4.
 
-    Returns the number of E4 emails dispatched.
+    This function is a stub that logs and returns 0. Any still-scheduled E4s
+    (rows with Onboarding_Status='docs_request_scheduled') are NOT fired.
+    Derek can approve a draft that contains the docs ask, which is what E4 did.
     """
-    sent_count = 0
-    now = datetime.utcnow()
-
-    try:
-        from app.sheets import get_all_carriers, update_carrier_fields_by_dot
-    except Exception as e:
-        logger.error("process_scheduled_doc_requests: could not import sheets: %s", e)
-        return 0
-
-    try:
-        carriers = get_all_carriers()
-    except Exception as e:
-        logger.error("process_scheduled_doc_requests: get_all_carriers failed: %s", e)
-        return 0
-
-    for c in carriers:
-        if c.get("Onboarding_Status") != "docs_request_scheduled":
-            continue
-
-        scheduled_raw = (c.get("Onboarding_E4_ScheduledFor") or "").strip()
-        if not scheduled_raw:
-            continue
-
-        try:
-            scheduled_dt = datetime.fromisoformat(scheduled_raw)
-        except ValueError:
-            logger.warning(
-                "process_scheduled_doc_requests: unparseable schedule time %r -- skipping",
-                scheduled_raw,
-            )
-            continue
-
-        if scheduled_dt > now:
-            continue  # not yet due
-
-        dot = (c.get("DOT_Number") or c.get("DOT Number") or "").strip()
-        if not dot:
-            continue
-
-        email = (c.get("Primary_Email") or c.get("Contact Email") or "").strip()
-        thread_id = (c.get("Outreach_Thread_Id") or "").strip()
-        contact_name = (c.get("Contact Name") or "").strip()
-        if contact_name:
-            contact_name = contact_name.title() if contact_name.isupper() else contact_name
-        legal_name = (
-            c.get("DBA_Name") or c.get("Legal_Name") or c.get("Company Name") or ""
-        ).strip()
-
-        logger.info(
-            "process_scheduled_doc_requests: DOT=%s scheduled_for=%s -- firing E4",
-            dot, scheduled_raw,
-        )
-
-        if not get_settings().OUTREACH_AUTO_REPLY_ENABLED:
-            logger.info(
-                "AUTO-REPLY DISABLED: would send E4 to DOT=%s (%s)", dot, email
-            )
-            # Still mark sent so we don't re-queue endlessly in dry-run mode
-        else:
-            try:
-                from app.gmail import reply_to_thread, send_email
-                body = _render_e4_body(contact_name, legal_name)
-                subject = "Re: Introduction -- deBoer Freight"
-                if thread_id:
-                    reply_to_thread(thread_id=thread_id, to=email, subject=subject, body_text=body)
-                else:
-                    send_email(to=email, subject=subject, body_text=body)
-                logger.info("E4 sent to DOT=%s (%s)", dot, email)
-            except Exception as e:
-                logger.error("E4 send failed for DOT=%s: %s", dot, e)
-                continue  # leave status as scheduled; will retry next tick
-
-        sent_at = datetime.utcnow().isoformat()
-        try:
-            update_carrier_fields_by_dot(dot, {
-                "Onboarding_Status": "docs_requested",
-                "Onboarding_E4_SentAt": sent_at,
-            })
-        except Exception as e:
-            logger.error("Failed to update sheet after E4 send for DOT=%s: %s", dot, e)
-
-        # Create Gmail label + Drive folder via onboarding_intake
-        try:
-            from app.onboarding_intake import handle_carrier_interested
-            handle_carrier_interested(dot)
-        except Exception as e:
-            logger.warning("handle_carrier_interested failed for DOT=%s (non-fatal): %s", dot, e)
-
-        sent_count += 1
-
-    if sent_count:
-        logger.info("process_scheduled_doc_requests: %d E4(s) dispatched", sent_count)
-    return sent_count
+    logger.info(
+        "process_scheduled_doc_requests: DISABLED (Fix 6) -- "
+        "auto-E4 superseded by draft-and-approve flow"
+    )
+    return 0

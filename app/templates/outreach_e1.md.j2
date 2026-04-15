@@ -1,19 +1,20 @@
 {# E1 — First-touch carrier outreach for deBoer Freight / Sofia Reyes
    Variables available:
-     legal_name   : str  — carrier legal or DBA name (may be blank)
-     state        : str  — carrier state abbreviation (may be blank)
-     equipment    : str  — human-readable equipment bucket (e.g. "dry van, flatbed")
-     contact_name : str  — primary contact name (may be blank)
+     legal_name      : str  — carrier legal or DBA name (may be blank); DO NOT title-case
+     state           : str  — carrier state abbreviation (may be blank)
+     state_full      : str  — full state name (e.g. "Florida")
+     equipment       : str  — human-readable equipment bucket (e.g. "dry vans and flatbeds")
+     contact_name    : str  — primary contact name (may be blank); preserve casing
 
    Subject rotation: based on (dot_number|0) % 3
      0 -> "Introduction — deBoer Freight"
-     1 -> "{{ legal_name }} — capacity question"   (or fallback if blank)
+     1 -> "{{ legal_name }}: capacity question"   (or fallback if blank; preserve legal name casing)
      2 -> "Quick intro from deBoer Freight"
 #}
 
 {# ---------- SUBJECT ---------- #}
 {% if subject_variant == 1 and legal_name %}
-{{ legal_name }} -- capacity question
+{{ legal_name }}: capacity question
 {% elif subject_variant == 2 %}
 Quick intro from deBoer Freight
 {% else %}
@@ -22,23 +23,23 @@ Introduction -- deBoer Freight
 
 {# ---------- BODY ---------- #}
 {% if contact_name %}
-Hi {{ contact_name }} --
+Hi {{ contact_name }},
 {% else %}
-Hi --
+Hi,
 {% endif %}
 
-deBoer Freight is a licensed broker based in South Florida{% if state %}, and we move freight regularly out of {{ state }}{% endif %}. We're building out our carrier network for FL-origin loads and wanted to reach out.
+My name is Derek deBoer, owner/operator of deBoer Freight, a licensed broker based in South Florida. We move freight regularly in and out of {{ state_full if state_full else "the Southeast" }} and we're building out our carrier network.
 
 {% if equipment and equipment != "freight" %}
-We're specifically looking for carriers running {{ equipment }} on Southeast and outbound FL lanes.
+We're specifically looking for carriers running {{ equipment }} in and out of {{ state_full if state_full else "the Southeast" }}.
 {% else %}
-We're looking for carriers running dry van, flatbed, or box truck on Southeast and outbound FL lanes.
+We're looking for carriers running dry vans, flatbeds, or box trucks in and out of {{ state_full if state_full else "the Southeast" }}.
 {% endif %}
 
 If you've got capacity in that region, we'd like to get you in our system. Just reply with your rate sheet or ballpark pricing on the lanes you run and we'll go from there.
 
 Thanks,
-Sofia Reyes
-Carrier Ops | deBoer Freight
-866-926-4285 (866-926-HAUL)
-sales@deboerfreight.com
+Derek deBoer
+www.deboerfreight.com
+(305) 767-3480
+MC 1712065

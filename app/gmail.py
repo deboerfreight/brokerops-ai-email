@@ -229,7 +229,7 @@ def send_email(
 
     settings = get_settings()
     msg["to"] = to
-    msg["from"] = settings.BROKER_EMAIL
+    msg["from"] = f'"Derek deBoer" <{settings.BROKER_EMAIL}>'
     msg["subject"] = subject
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
