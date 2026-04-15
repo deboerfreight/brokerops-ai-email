@@ -42,16 +42,20 @@ def test_vet_carrier_strict_rejects_low_liability():
     assert "liability" in reason.lower() or "1m" in reason.lower()
 
 
-def test_vet_carrier_strict_rejects_low_cargo():
-    carrier = {
-        "Legal_Name": "Test",
-        "Power_Units": 10,
-        "Insurance_Liability": 1_000_000,
-        "Insurance_Cargo": 50_000,
-    }
+def test_vet_carrier_strict_low_cargo_no_longer_rejects():
+    """As of 2026-04-14, RULES.cargo_min is 0 because FMCSA does not publish
+    cargo insurance filings for general-freight carriers. Low cargo values
+    (e.g. $50K) must NOT trigger a hard reject on the cargo gate — cargo
+    verification moved to onboarding via COI collection. See rules.py."""
+    from app.vetting.rules import RULES
+    assert RULES.cargo_min == 0, (
+        "Test assumes cargo_min=0 per 2026-04-14 rule change. If cargo_min "
+        "is ever raised, this test must be updated to match."
+    )
+    carrier = _base_clean_carrier()
+    carrier["Insurance_Cargo"] = 50_000
     passed, reason = vet_carrier_strict(carrier)
-    assert passed is False
-    assert "cargo" in reason.lower() or "100k" in reason.lower()
+    assert passed is True, f"expected pass, got: {reason}"
 
 
 def test_vet_carrier_strict_rejects_low_fleet_size():

@@ -14,6 +14,7 @@ from typing import Any, Optional
 import httpx
 
 from app.config import get_settings
+from app.vetting.rules import RULES
 
 logger = logging.getLogger("brokerops.fmcsa")
 
@@ -191,35 +192,20 @@ def get_carrier_details(dot_number: str) -> Optional[dict]:
 
     normalized = _normalize_carrier(carrier_data)
 
-    # Fetch BASICS/safety data (crash counts, inspection details)
+    # Inspection + crash counts already populated from base /carriers/{dot}
+    # response inside _normalize_carrier. The /basics endpoint returns CSA
+    # category measures (Unsafe Driving, HOS Compliance, etc.) — NOT raw
+    # inspection counts — so we no longer call it for hydration. Only compute
+    # crash rate per 100 power units here.
     if normalized:
-        try:
-            basics = get_carrier_basics(dot_number)
-            if basics:
-                normalized["Crash_Total"] = basics.get("Crash_Total", 0)
-                normalized["Fatal_Crash"] = basics.get("Fatal_Crash", 0)
-                normalized["Injury_Crash"] = basics.get("Injury_Crash", 0)
-                normalized["Tow_Crash"] = basics.get("Tow_Crash", 0)
-                normalized["Vehicle_Insp"] = basics.get("Vehicle_Insp", 0)
-                normalized["Vehicle_OOS_Insp"] = basics.get("Vehicle_OOS_Insp", 0)
-                normalized["Driver_Insp"] = basics.get("Driver_Insp", 0)
-                normalized["Driver_OOS_Insp"] = basics.get("Driver_OOS_Insp", 0)
-                # Recompute OOS rates from BASICS if available (more reliable)
-                if basics.get("Vehicle_OOS_Rate") is not None:
-                    normalized["Vehicle_OOS_Rate"] = basics["Vehicle_OOS_Rate"]
-                if basics.get("Driver_OOS_Rate") is not None:
-                    normalized["Driver_OOS_Rate"] = basics["Driver_OOS_Rate"]
-                # Compute crash rate per 100 power units
-                power_units = normalized.get("Power_Units", 0)
-                crash_total = basics.get("Crash_Total", 0)
-                if power_units > 0 and crash_total > 0:
-                    normalized["Crash_Rate_Per100"] = round(
-                        (crash_total / power_units) * 100, 2
-                    )
-                else:
-                    normalized["Crash_Rate_Per100"] = 0.0
-        except Exception as exc:
-            logger.debug("BASICS fetch failed for DOT %s: %s", dot_number, exc)
+        power_units = normalized.get("Power_Units", 0)
+        crash_total = normalized.get("Crash_Total", 0)
+        if power_units > 0 and crash_total > 0:
+            normalized["Crash_Rate_Per100"] = round(
+                (crash_total / power_units) * 100, 2
+            )
+        else:
+            normalized["Crash_Rate_Per100"] = 0.0
 
     # Overlay FMCSA L&I bulk-file insurance (QCMobile REST returns None for
     # BIPD/cargo fields, so this is the authoritative source for insurance).
@@ -399,6 +385,20 @@ def _normalize_carrier(raw: dict) -> Optional[dict]:
     veh_oos = _safe_float(raw.get("vehicleOosRate", raw.get("vehicleOosRatePercent", 0)))
     drv_oos = _safe_float(raw.get("driverOosRate", raw.get("driverOosRatePercent", 0)))
 
+    # Inspection + crash counts (base /carriers/{dot} endpoint returns these
+    # as top-level fields; the /basics endpoint returns CSA category measures,
+    # NOT raw counts — see BUG 1 fix 2026-04-14). Reading here ensures every
+    # hydrated carrier has usable inspection data for the rate-based reefer
+    # rule and data-reliability floors.
+    veh_insp = _safe_int(raw.get("vehicleInsp", 0))
+    veh_oos_insp = _safe_int(raw.get("vehicleOosInsp", 0))
+    drv_insp = _safe_int(raw.get("driverInsp", 0))
+    drv_oos_insp = _safe_int(raw.get("driverOosInsp", 0))
+    crash_total = _safe_int(raw.get("crashTotal", 0))
+    fatal_crash = _safe_int(raw.get("fatalCrash", 0))
+    injury_crash = _safe_int(raw.get("injCrash", raw.get("injuryCrash", 0)))
+    tow_crash = _safe_int(raw.get("towawayCrash", raw.get("towCrash", 0)))
+
     # Fleet
     power_units = _safe_int(raw.get("totalPowerUnits", 0))
     drivers = _safe_int(raw.get("totalDrivers", 0))
@@ -427,6 +427,14 @@ def _normalize_carrier(raw: dict) -> Optional[dict]:
         "Safety_Rating": _normalize_safety_rating(str(safety_rating)),
         "Vehicle_OOS_Rate": veh_oos,
         "Driver_OOS_Rate": drv_oos,
+        "Vehicle_Insp": veh_insp,
+        "Vehicle_OOS_Insp": veh_oos_insp,
+        "Driver_Insp": drv_insp,
+        "Driver_OOS_Insp": drv_oos_insp,
+        "Crash_Total": crash_total,
+        "Fatal_Crash": fatal_crash,
+        "Injury_Crash": injury_crash,
+        "Tow_Crash": tow_crash,
         "Power_Units": power_units,
         "Driver_Count": drivers,
         "Equipment_Types": ",".join(equipment_types) if equipment_types else "",
@@ -551,23 +559,22 @@ def score_carrier(carrier: dict) -> int:
         return -1
 
     # ── Insurance hard floors ──────────────────────────────────
-    # $1,000,000 liability (BIPD) = minimum floor
-    # $100,000 cargo = minimum floor
+    # Thresholds come from app/vetting/rules.py::RULES (single source of truth).
     # If insurance data is missing (0), skip rather than disqualify —
     # the name search endpoint doesn't always return insurance.
     liability = carrier.get("Insurance_Liability", 0)
     cargo = carrier.get("Insurance_Cargo", 0)
-    if liability > 0 and liability < 1_000_000:
-        logger.debug("Disqualified %s: liability=%d < $1M floor", name, liability)
+    if liability > 0 and liability < RULES.liability_min:
+        logger.debug("Disqualified %s: liability=%d < $%d floor", name, liability, RULES.liability_min)
         return -1
-    if cargo > 0 and cargo < 100_000:
-        logger.debug("Disqualified %s: cargo=%d < $100K floor", name, cargo)
+    if RULES.cargo_min > 0 and cargo > 0 and cargo < RULES.cargo_min:
+        logger.debug("Disqualified %s: cargo=%d < $%d floor", name, cargo, RULES.cargo_min)
         return -1
 
-    # ── Fleet size hard floor: 3 power units minimum ──────────
+    # ── Fleet size hard floor: RULES.fleet_min power units minimum ──────────
     units = carrier.get("Power_Units", 0)
-    if units > 0 and units < 3:
-        logger.debug("Disqualified %s: fleet size %d < 3 minimum", name, units)
+    if units > 0 and units < RULES.fleet_min:
+        logger.debug("Disqualified %s: fleet size %d < %d minimum", name, units, RULES.fleet_min)
         return -1
 
     # ── Shell / stale carrier: 0 drivers with >0 units ────────
@@ -576,22 +583,22 @@ def score_carrier(carrier: dict) -> int:
         logger.debug("Disqualified %s: 0 drivers with %d units (shell/stale)", name, units)
         return -1
 
-    # ── Vehicle OOS rate > 30% ────────────────────────────────
+    # ── Vehicle OOS rate > RULES.vehicle_oos_max_pct ──────────
     veh_oos = carrier.get("Vehicle_OOS_Rate", 0)
-    if veh_oos > 30:
-        logger.debug("Disqualified %s: vehicle OOS rate %.1f%% > 30%%", name, veh_oos)
+    if veh_oos > RULES.vehicle_oos_max_pct:
+        logger.debug("Disqualified %s: vehicle OOS rate %.1f%% > %.0f%%", name, veh_oos, RULES.vehicle_oos_max_pct)
         return -1
 
-    # ── Driver OOS rate > 15% ─────────────────────────────────
+    # ── Driver OOS rate > RULES.driver_oos_max_pct ────────────
     drv_oos = carrier.get("Driver_OOS_Rate", 0)
-    if drv_oos > 15:
-        logger.debug("Disqualified %s: driver OOS rate %.1f%% > 15%%", name, drv_oos)
+    if drv_oos > RULES.driver_oos_max_pct:
+        logger.debug("Disqualified %s: driver OOS rate %.1f%% > %.0f%%", name, drv_oos, RULES.driver_oos_max_pct)
         return -1
 
-    # ── Crash rate > 30 per 100 power units ───────────────────
+    # ── Crash rate > RULES.crash_rate_max_per_100 per 100 power units ───
     crash_rate = _safe_float(carrier.get("Crash_Rate_Per100", 0))
-    if crash_rate > 30:
-        logger.debug("Disqualified %s: crash rate %.1f > 30 per 100 units", name, crash_rate)
+    if crash_rate > RULES.crash_rate_max_per_100:
+        logger.debug("Disqualified %s: crash rate %.1f > %.0f per 100 units", name, crash_rate, RULES.crash_rate_max_per_100)
         return -1
 
     # ══════════════════════════════════════════════════════════════
@@ -634,9 +641,9 @@ def score_carrier(carrier: dict) -> int:
         score += 18
     elif units >= 6:
         score += 14
-    elif units >= 3:
+    elif units >= RULES.fleet_min:
         score += 10
-    # < 3 already hard-rejected above
+    # < RULES.fleet_min already hard-rejected above
 
     # ── 3. Authority Age / History (20 pts — forgiving) ────────
     # Don't auto-reject young authorities; just score them lower.
@@ -655,14 +662,17 @@ def score_carrier(carrier: dict) -> int:
     # auth_age_months == 0 (unknown) = 0 pts
 
     # ── 4. Insurance Above Minimums (10 pts — tiebreaker only) ─
-    # $1M/$100K = full credit. Above = small bonus. This is NOT
-    # a major differentiator — just a tiebreaker.
-    if liability >= 1_000_000:
+    # Liability floor from RULES; above = small bonus. NOT a major
+    # differentiator — just a tiebreaker. Cargo floor is 0 (RULES.cargo_min)
+    # because FMCSA doesn't publish cargo filings for general freight;
+    # cargo verification moved to onboarding via COI collection. Only
+    # the "extra coverage" bonus tiers remain meaningful for cargo.
+    if liability >= RULES.liability_min:
         score += 5  # meets floor = full base credit
-    if liability >= 2_000_000:
+    if liability >= 2 * RULES.liability_min:
         score += 2  # small bonus for extra coverage
     if cargo >= 100_000:
-        score += 2  # meets floor = full base credit
+        score += 2  # small bonus: carrier self-reported >= $100K cargo
     if cargo >= 250_000:
         score += 1  # small bonus for extra coverage
 
@@ -791,31 +801,33 @@ def vet_carrier_strict(
     """
     name = carrier.get("Legal_Name", "unknown")
 
-    # ── Fleet size < 3 power units ────────────────────────────
+    # ── Fleet size < RULES.fleet_min power units ──────────────
     units = _safe_int(carrier.get("Power_Units", 0))
-    if units > 0 and units < 3:
+    if units > 0 and units < RULES.fleet_min:
         reason = (
-            f"REJECT: Fleet size {units} power units below 3 minimum"
+            f"REJECT: Fleet size {units} power units below {RULES.fleet_min} minimum"
         )
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason
 
-    # ── Liability insurance below $1M ────────────────────────────
+    # ── Liability insurance below RULES.liability_min ─────────
     # Mirrors score_carrier(): the >0 guard means missing/blank insurance
     # data is not a hard reject here (treated as needs_review downstream).
     liability = _safe_int(carrier.get("Insurance_Liability", 0))
-    if liability > 0 and liability < 1_000_000:
+    if liability > 0 and liability < RULES.liability_min:
         reason = (
-            f"REJECT: Liability ${liability:,} below $1M minimum"
+            f"REJECT: Liability ${liability:,} below ${RULES.liability_min:,} minimum"
         )
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason
 
-    # ── Cargo insurance below $100K ──────────────────────────────
+    # ── Cargo insurance below RULES.cargo_min ─────────────────
+    # RULES.cargo_min is 0 for general freight (see rules.py docstring);
+    # the check is kept in case the threshold is ever raised.
     cargo = _safe_int(carrier.get("Insurance_Cargo", 0))
-    if cargo > 0 and cargo < 100_000:
+    if RULES.cargo_min > 0 and cargo > 0 and cargo < RULES.cargo_min:
         reason = (
-            f"REJECT: Cargo ${cargo:,} below $100K minimum"
+            f"REJECT: Cargo ${cargo:,} below ${RULES.cargo_min:,} minimum"
         )
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason
@@ -829,36 +841,43 @@ def vet_carrier_strict(
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason
 
-    # ── Vehicle OOS rate > 30% ─────────────────────────────────
+    # ── Vehicle OOS rate > RULES.vehicle_oos_max_pct ──────────
     veh_oos = _safe_float(carrier.get("Vehicle_OOS_Rate", 0))
-    if veh_oos > 30:
+    if veh_oos > RULES.vehicle_oos_max_pct:
         reason = (
-            f"REJECT: Vehicle OOS rate {veh_oos:.1f}% exceeds 30% threshold"
+            f"REJECT: Vehicle OOS rate {veh_oos:.1f}% exceeds "
+            f"{RULES.vehicle_oos_max_pct:.0f}% threshold"
         )
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason
 
-    # ── Driver OOS rate > 15% ──────────────────────────────────
+    # ── Driver OOS rate > RULES.driver_oos_max_pct ────────────
     drv_oos = _safe_float(carrier.get("Driver_OOS_Rate", 0))
-    if drv_oos > 15:
+    if drv_oos > RULES.driver_oos_max_pct:
         reason = (
-            f"REJECT: Driver OOS rate {drv_oos:.1f}% exceeds 15% threshold"
+            f"REJECT: Driver OOS rate {drv_oos:.1f}% exceeds "
+            f"{RULES.driver_oos_max_pct:.0f}% threshold"
         )
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason
 
-    # ── Crash rate > 30 per 100 power units ────────────────────
+    # ── Crash rate > RULES.crash_rate_max_per_100 per 100 power units ───
     crash_rate = _safe_float(carrier.get("Crash_Rate_Per100", 0))
-    if crash_rate > 30:
+    if crash_rate > RULES.crash_rate_max_per_100:
         reason = (
             f"REJECT: Crash rate {crash_rate:.1f} per 100 power units "
-            f"exceeds 30 threshold"
+            f"exceeds {RULES.crash_rate_max_per_100:.0f} threshold"
         )
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason
 
-    # ── Reefer zero tolerance on vehicle maintenance OOS ───────
-    # Determine equipment from explicit param or carrier data
+    # ── Reefer stricter standards (rate-based, 2026-04-15) ─────
+    # Old rule was "any vehicle OOS inspection = reject" which was
+    # mathematically impossible for any mid-size or larger reefer fleet
+    # to clear. New rate-based rule requires (a) enough inspection history
+    # to trust the data and (b) an OOS rate under the reefer-specific
+    # stricter threshold — roughly half the general-freight 30% floor.
+    # See app/vetting/rules.py::VettingRules.reefer_* for thresholds.
     equip = equipment_types
     if equip is None:
         equip_str = carrier.get("Equipment_Types", "")
@@ -866,11 +885,20 @@ def vet_carrier_strict(
 
     is_reefer = any("REEFER" in e.upper() for e in (equip or []))
     if is_reefer:
-        veh_oos_insp = _safe_int(carrier.get("Vehicle_OOS_Insp", 0))
-        if veh_oos_insp > 0:
+        veh_insp = _safe_int(carrier.get("Vehicle_Insp", 0))
+        if veh_insp < RULES.reefer_min_inspection_count:
             reason = (
-                f"REJECT: Reefer carrier has {veh_oos_insp} vehicle "
-                f"maintenance OOS inspection(s) — zero tolerance for reefer"
+                f"NEEDS REVIEW: Reefer carrier has only {veh_insp} vehicle "
+                f"inspection(s), below {RULES.reefer_min_inspection_count} minimum "
+                f"for OOS rate reliability"
+            )
+            logger.info("Strict vet NEEDS_REVIEW %s: %s", name, reason)
+            return False, reason
+        veh_oos_rate = _safe_float(carrier.get("Vehicle_OOS_Rate", 0))
+        if veh_oos_rate > RULES.reefer_vehicle_oos_max_pct:
+            reason = (
+                f"REJECT: Reefer carrier vehicle OOS rate {veh_oos_rate:.1f}% "
+                f"exceeds reefer-specific {RULES.reefer_vehicle_oos_max_pct:.0f}% threshold"
             )
             logger.info("Strict vet REJECT %s: %s", name, reason)
             return False, reason

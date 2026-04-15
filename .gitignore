@@ -21,3 +21,4 @@ scripts/logs/
 
 # FMCSA L&I bulk CSV snapshots + lookup DB (regeneratable)
 data/fmcsa_li/
+brokerops.db

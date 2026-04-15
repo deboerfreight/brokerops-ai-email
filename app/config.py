@@ -46,9 +46,12 @@ class Settings(BaseSettings):
     # ── Apollo.io ────────────────────────────────────────────────
     APOLLO_API_KEY: str = ""
 
-    # ── Google Custom Search Engine ──────────────────────────────
+    # ── Google Custom Search Engine (dormant — dropped 2026-04-15, CSE deprecated) ──
     GOOGLE_CSE_API_KEY: str = ""
     GOOGLE_CSE_CX: str = ""
+
+    # ── Brave Search API ─────────────────────────────────────────
+    BRAVE_SEARCH_API_KEY: str = ""
 
     # ── Google Maps (Directions API for route mileage in quotes) ─
     GOOGLE_MAPS_API_KEY: str = ""
@@ -62,8 +65,10 @@ class Settings(BaseSettings):
     # ── Polling / behaviour ──────────────────────────────────────
     RFQ_BATCH_SIZE: int = 5
     RFQ_EXPANSION_DELAY_SECONDS: int = 7200   # 2 hours
-    MIN_AUTO_LIABILITY: int = 1_000_000
-    MIN_CARGO_COVERAGE: int = 100_000
+    # MIN_AUTO_LIABILITY / MIN_CARGO_COVERAGE removed 2026-04-14 — duplicated
+    # the canonical thresholds in app/vetting/rules.py::RULES. Every caller now
+    # imports `from app.vetting.rules import RULES` and reads
+    # `RULES.liability_min` / `RULES.cargo_min` directly.
 
     # ── Auto-reply kill switch ───────────────────────────────────
     # Master feature flag. When False, Sofia does not auto-reply to

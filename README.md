@@ -2,6 +2,16 @@
 
 Internal freight brokerage automation system. Runs as a FastAPI service on Google Cloud Run, using Gmail + Google Drive + Google Sheets as the system of record.
 
+**Canonical carrier search protocol:** `docs/carrier_search_protocol.md`
+
+## Last major changes — 2026-04-15
+
+1. **Towing/service-type denylist** — `EXCLUDED_SERVICE_TYPE_PATTERNS` added to `scripts/prospect_carriers.py:76`. Blocks towing, moving, excavating, livestock, logging, and 20+ other non-target service types from entering the DB. Root cause of 21 towing rows in overnight L&I run.
+2. **Service Type tagging** — `Service_Type` column on Carrier_Master: General / Heavy Haul / Auto Transport / Fuel. Heavy Haul, Auto Transport, and Fuel are kept (future business), not quarantined.
+3. **State backfill** — `scripts/enrich_carriers_playwright.py --backfill-states` fills blank State fields (~42 rows). Integrated into enrichment workflow.
+4. **`--state` mode for `prospect_carriers.py`** — new flags: `--state XX`, `--buckets flatbed,dry_van,box_truck,reefer`, `--zip-prefixes`, `--limit N`. Replaces deprecated per-state scripts (MN/OH/TX).
+5. **SAFER scraping removed** — `_scrape_safer()` deleted from `app/email_enrichment.py`. Was bot-blocked (JS-gated portal); root-caused 2026-04-13. Enrichment waterfall is now 3-step: Apollo → Google CSE → PHONE_ONLY.
+
 ## Architecture Overview
 
 ```

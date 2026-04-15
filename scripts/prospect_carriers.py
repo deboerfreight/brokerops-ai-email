@@ -27,6 +27,7 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import date, datetime
@@ -49,6 +50,7 @@ from app.vetting.li_insurance_lookup import (
     SourcingCandidate,
     search_carriers_by_state,
 )
+from app.vetting.rules import RULES
 
 # Try importing vet_carrier_strict — being built by another developer in parallel.
 # Falls back to basic scoring only if not yet available.
@@ -58,6 +60,61 @@ except ImportError:
     vet_carrier_strict = None  # type: ignore[assignment]
 
 logger = logging.getLogger("brokerops.prospect")
+
+# ── Service-type exclusion denylist ───────────────────────────────────────────
+# Carriers whose legal or DBA name matches any of these patterns are skipped
+# BEFORE insertion into the database. Runs in search_cluster_carriers() right
+# after hydration and scoring, prior to enrich_and_store().
+#
+# Pattern policy: feedback_carrier_category_rules.md (memory)
+#   - Hard-exclude: towing, passenger, HHG moving, excavating, waste, logging
+#   - Keep (do NOT exclude): heavy haul, rigging, auto transport, fuel/propane
+#     (these are handled by service-type tagging at the DB level, not exclusion)
+#
+# To add a new pattern: extend this list. To temporarily disable a pattern:
+# comment it out — do not delete, so we preserve the policy rationale.
+EXCLUDED_SERVICE_TYPE_PATTERNS = re.compile(
+    r"""
+    \b(
+        tow(?:ing)?                     |  # towing / tow service
+        wrecker                         |  # wrecker service
+        recovery                        |  # vehicle recovery
+        passenger                       |  # passenger transport
+        bus\s+(?:lines?|co(?:mpany)?|services?)  |  # bus lines / bus co.
+        coach                           |  # coach transport
+        shuttle                         |  # shuttle service
+        tours?                          |  # tours
+        charter                         |  # charter
+        excavat(?:ing|ion)?             |  # excavating
+        grading                         |  # grading (earthwork)
+        paving                          |  # paving
+        concrete                        |  # concrete
+        waste                           |  # waste / garbage
+        garbage                         |  # garbage
+        refuse                          |  # refuse
+        disposal                        |  # disposal
+        sanitation                      |  # sanitation
+        septic                          |  # septic
+        roll.?off                       |  # roll-off dumpsters
+        landscap(?:e|ing)?              |  # landscaping
+        lawn\s+(?:care|service|mow)     |  # lawn care
+        arborist                        |  # arborist / tree
+        oilfield                        |  # oilfield services
+        frac(?:turing)?                 |  # fracking
+        drilling                        |  # drilling
+        logging                         |  # logging / timber
+        timber                          |  # timber
+        pulpwood                        |  # pulpwood
+        livestock                       |  # livestock hauling
+        cattle                          |  # cattle hauling
+        equine                          |  # equine / horse
+        van\s+lines                     |  # van lines (moving)
+        movers?                         |  # movers
+        moving                             # moving company
+    )\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -218,15 +275,8 @@ def build_search_targets(dcs: list[dict[str, str]]) -> dict[str, list[dict[str, 
 def _vet_strict_fallback(carrier: dict) -> tuple[bool, str]:
     """Fallback strict vetting when vet_carrier_strict is not yet available.
 
-    Hard reject thresholds:
-        - Authority must be ACTIVE
-        - No OOS active flag
-        - Unsatisfactory safety rating = REJECT
-        - Vehicle OOS rate > 30% = REJECT
-        - Driver OOS rate > 15% = REJECT
-        - Crash rate > 30 per 100 units = REJECT
-        - Fleet size < 3 power units = REJECT
-        - 0 drivers with >0 units (shell/stale) = REJECT
+    Hard reject thresholds pulled from app/vetting/rules.py::RULES — the
+    single source of truth for every vetting consumer.
     """
     name = carrier.get("Legal_Name", "unknown")
 
@@ -240,27 +290,27 @@ def _vet_strict_fallback(carrier: dict) -> tuple[bool, str]:
         return False, "unsatisfactory safety rating"
 
     veh_oos = carrier.get("Vehicle_OOS_Rate", 0)
-    if veh_oos > 30:
-        return False, f"vehicle OOS rate {veh_oos}% > 30%"
+    if veh_oos > RULES.vehicle_oos_max_pct:
+        return False, f"vehicle OOS rate {veh_oos}% > {RULES.vehicle_oos_max_pct:.0f}%"
 
     drv_oos = carrier.get("Driver_OOS_Rate", 0)
-    if drv_oos > 15:
-        return False, f"driver OOS rate {drv_oos}% > 15%"
+    if drv_oos > RULES.driver_oos_max_pct:
+        return False, f"driver OOS rate {drv_oos}% > {RULES.driver_oos_max_pct:.0f}%"
 
-    # Fleet size: 3 trucks minimum
+    # Fleet size minimum
     units = carrier.get("Power_Units", 0)
-    if units > 0 and units < 3:
-        return False, f"fleet size {units} < 3 minimum"
+    if units > 0 and units < RULES.fleet_min:
+        return False, f"fleet size {units} < {RULES.fleet_min} minimum"
 
     # Shell / stale carrier: 0 drivers with >0 units
     drivers = carrier.get("Driver_Count", 0)
     if units > 0 and drivers == 0:
         return False, f"0 drivers with {units} units (shell/stale)"
 
-    # Crash rate > 30 per 100 power units
+    # Crash rate threshold
     crash_rate = carrier.get("Crash_Rate_Per100", 0)
-    if crash_rate and crash_rate > 30:
-        return False, f"crash rate {crash_rate} > 30 per 100 units"
+    if crash_rate and crash_rate > RULES.crash_rate_max_per_100:
+        return False, f"crash rate {crash_rate} > {RULES.crash_rate_max_per_100:.0f} per 100 units"
 
     return True, "passed"
 
@@ -312,7 +362,7 @@ def search_cluster_carriers(
     seen_dots: set[str],
     dry_run: bool = False,
     cluster_name: str | None = None,
-    min_bipd: int = 1_000_000,
+    min_bipd: int = RULES.liability_min,
 ) -> list[dict[str, Any]]:
     """Source carriers from the L&I bulk-file SQLite index, hydrate via
     QCMobile, vet strictly, and return qualified carriers.
@@ -456,6 +506,20 @@ def search_cluster_carriers(
             )
             continue
 
+        # Service-type denylist — check BEFORE insert (policy: feedback_carrier_category_rules.md)
+        # Matches towing, passenger, moving, excavating, waste, logging, etc.
+        # Does NOT exclude heavy haul, rigging, auto transport, or fuel/propane.
+        legal_name = carrier.get("Legal_Name") or cand.legal_name or ""
+        dba_name   = carrier.get("DBA_Name") or cand.dba_name or ""
+        check_name = f"{legal_name} {dba_name}".strip()
+        _deny_match = EXCLUDED_SERVICE_TYPE_PATTERNS.search(check_name)
+        if _deny_match:
+            logger.info(
+                "DENYLIST DOT %s (%s): matched pattern '%s' in name '%s'",
+                dot, legal_name, _deny_match.group(0), check_name,
+            )
+            continue
+
         carrier["Carrier_Score"] = score
         carrier["_l_i_source"] = True
         carrier["_l_i_bipd_filed"] = cand.bipd_filed
@@ -544,15 +608,13 @@ def enrich_and_store(
         "Power_Units": carrier.get("Power_Units", 0),
         "Driver_Count": carrier.get("Driver_Count", 0),
         "Insurance_Liability": carrier.get("Insurance_Liability", 0),
-        # Cargo insurance semantics: FMCSA only publishes cargo filings for
-        # HHG carriers. General-freight carriers have no filed cargo and
-        # that's expected — cargo coverage is contractual, verified at
-        # onboarding. `cargo_min` in rules.py is 0 to match this reality,
-        # but the gate still flips blank-cargo to `needs_review`. We stamp
-        # a sentinel value of 1 so the gate lets the carrier through on
-        # the sourcing path (where we've already confirmed $1M+ BIPD via
-        # L&I bulk, which is the real hard financial gate).
-        "Insurance_Cargo": carrier.get("Insurance_Cargo") or 1,
+        # Cargo insurance: FMCSA only publishes cargo filings for HHG
+        # carriers. General-freight cargo coverage is contractual and
+        # verified at onboarding, so RULES.cargo_min is 0. The old sentinel
+        # workaround (overwriting blank with 1) was removed 2026-04-14 after
+        # the gate's blank-cargo handling was fixed — whatever FMCSA returns
+        # (typically 0) now correctly passes the gate.
+        "Insurance_Cargo": carrier.get("Insurance_Cargo", 0),
         "Safety_Rating": carrier.get("Safety_Rating", ""),
         "Vehicle_OOS_Rate": carrier.get("Vehicle_OOS_Rate", 0),
         "Driver_OOS_Rate": carrier.get("Driver_OOS_Rate", 0),
@@ -760,7 +822,7 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             # Safety vetting (OOS, crash rate) stays strict regardless.
             if cluster_name in ("SOUTH_FL", "CENTRAL_FL"):
                 effective_min_score = min(args.min_score, 25)
-                effective_min_fleet = max(args.min_fleet, 3) if args.min_fleet <= 3 else args.min_fleet
+                effective_min_fleet = max(args.min_fleet, RULES.fleet_min) if args.min_fleet <= RULES.fleet_min else args.min_fleet
             else:
                 effective_min_score = args.min_score
                 effective_min_fleet = args.min_fleet
@@ -850,6 +912,9 @@ def parse_args() -> argparse.Namespace:
 Examples:
   python -m scripts.prospect_carriers --dry-run
   python -m scripts.prospect_carriers --cluster SOUTH_FL --limit 10
+  python -m scripts.prospect_carriers --state MN --buckets flatbed,dry_van,box_truck --limit 5
+  python -m scripts.prospect_carriers --state OH --buckets flatbed,dry_van,reefer,box_truck --limit 10
+  python -m scripts.prospect_carriers --state TX --zip-prefixes 750,751,752 --limit 10
   python -m scripts.prospect_carriers --resume scripts/.checkpoints/prospect_20260407_120000.json
   python -m scripts.prospect_carriers --verbose --min-score 50 --min-fleet 10
         """,
@@ -862,17 +927,43 @@ Examples:
         "--cluster", type=str, default=None,
         help="Run one cluster only (SOUTH_FL, CENTRAL_FL, SOUTHEAST_US, MID_ATLANTIC, NATIONAL)",
     )
+    # ── State-mode flags (replaces state-specific scripts like mn/oh/tx_carrier_search) ──
+    parser.add_argument(
+        "--state", type=str, default=None,
+        help=(
+            "Run a direct single-state search instead of cluster mode. "
+            "Example: --state MN. Mutually exclusive with --cluster."
+        ),
+    )
+    parser.add_argument(
+        "--buckets", type=str, default=None,
+        help=(
+            "Comma-separated equipment buckets for --state mode. "
+            "Valid values: flatbed,dry_van,box_truck,reefer. "
+            "Default (when --state used): flatbed,dry_van,box_truck."
+        ),
+    )
+    parser.add_argument(
+        "--zip-prefixes", type=str, default=None,
+        dest="zip_prefixes",
+        help=(
+            "Comma-separated ZIP code prefixes to narrow --state sourcing. "
+            "Example: --zip-prefixes 330,331,332 (South FL). "
+            "Default: all ZIPs for the state."
+        ),
+    )
+    # ── Shared flags ──────────────────────────────────────────────────────────
     parser.add_argument(
         "--limit", type=int, default=30,
-        help="Max carriers per search target (default: 30)",
+        help="Max carriers per bucket/target (default: 30; use 5-10 for state-mode)",
     )
     parser.add_argument(
         "--min-score", type=int, default=40,
         help="Minimum carrier score threshold (default: 40)",
     )
     parser.add_argument(
-        "--min-fleet", type=int, default=3,
-        help="Minimum power units (default: 3)",
+        "--min-fleet", type=int, default=RULES.fleet_min,
+        help=f"Minimum power units (default: {RULES.fleet_min} — from RULES.fleet_min)",
     )
     parser.add_argument(
         "--source", type=str, default="csv", choices=["csv", "sheets"],
@@ -887,6 +978,160 @@ Examples:
         help="Enable debug logging",
     )
     return parser.parse_args()
+
+
+# ── State-mode pipeline ────────────────────────────────────────────────────────
+# Replaces mn_carrier_search_20260415.py, oh_carrier_search_20260415.py,
+# tx_carrier_search_20260415.py. Those scripts called insert_carrier() directly
+# without running EXCLUDED_SERVICE_TYPE_PATTERNS. This path runs the full
+# search_cluster_carriers() flow which enforces the denylist at line ~515.
+
+
+def _bucket_flags_for_carrier(carrier: dict, buckets: list[str]) -> list[str]:
+    """Return which of the requested buckets this carrier qualifies for."""
+    eq = (carrier.get("Equipment_Types") or "").upper()
+    cargo_carried = ""
+    raw = carrier.get("_raw") or {}
+    if isinstance(raw, dict):
+        cargo_carried = str(raw.get("cargoCarried") or "").upper()
+    units = int(carrier.get("Power_Units") or 0)
+
+    matched: list[str] = []
+    if "flatbed" in buckets and "FLATBED" in eq:
+        matched.append("flatbed")
+    if "dry_van" in buckets and "DRY_VAN" in eq:
+        matched.append("dry_van")
+    if "reefer" in buckets and "REEFER" in eq:
+        matched.append("reefer")
+    if "box_truck" in buckets:
+        is_general = "GENERAL FREIGHT" in cargo_carried or "GEN FREIGHT" in cargo_carried
+        has_other = any(t in eq for t in ("FLATBED", "REEFER", "TANKER"))
+        if is_general and 3 <= units <= 25 and not has_other:
+            matched.append("box_truck")
+    return matched
+
+
+def run_state_search(args: argparse.Namespace) -> dict[str, Any]:
+    """Execute a direct single-state search with per-bucket TOP-N logic.
+
+    This is the canonical replacement for the deprecated per-state scripts
+    (mn/oh/tx_carrier_search_20260415.py). Key contract:
+      - Denylist (EXCLUDED_SERVICE_TYPE_PATTERNS) runs via search_cluster_carriers()
+      - Vetting gate (vet_carrier, score_carrier) runs via search_cluster_carriers()
+      - insert_carrier / enrich_and_store called via the same path as cluster mode
+      - Preferred_Lanes tagged as {STATE}_{BUCKET_UPPER}
+    """
+    state = (args.state or "").upper().strip()
+    buckets_raw = args.buckets or "flatbed,dry_van,box_truck"
+    buckets = [b.strip().lower() for b in buckets_raw.split(",") if b.strip()]
+    zip_prefixes: Optional[tuple[str, ...]] = None
+    if args.zip_prefixes:
+        zip_prefixes = tuple(z.strip() for z in args.zip_prefixes.split(",") if z.strip())
+
+    valid_buckets = {"flatbed", "dry_van", "box_truck", "reefer"}
+    unknown = set(buckets) - valid_buckets
+    if unknown:
+        logger.error("Unknown bucket(s): %s. Valid: %s", unknown, valid_buckets)
+        sys.exit(1)
+
+    top_n = args.limit  # --limit controls TOP-N per bucket in state mode
+    # Overfetch so the vetting gate still fills the bucket after rejections.
+    # 1.5x is conservative — can be raised if state yields thin results.
+    sourcing_limit = max(top_n * 8, 50)
+
+    logger.info(
+        "State mode: state=%s buckets=%s zip_prefixes=%s top_n=%d sourcing_limit=%d dry_run=%s",
+        state, buckets, zip_prefixes, top_n, sourcing_limit, args.dry_run,
+    )
+
+    # Pre-seed dedup from main tab + Quarantine (same pattern as state scripts)
+    seen_dots: set[str] = set()
+    try:
+        for c in get_all_carriers():
+            dot = (c.get("DOT Number") or c.get("DOT_Number") or "").strip()
+            if dot:
+                seen_dots.add(str(int(dot)) if dot.isdigit() else dot)
+        logger.info("seen_dots pre-seeded from main tab: %d", len(seen_dots))
+    except Exception as exc:
+        logger.warning("main-tab dedup load failed: %s", exc)
+
+    # Source candidates — denylist enforced inside search_cluster_carriers()
+    qualified = search_cluster_carriers(
+        state=state,
+        zip_prefixes=zip_prefixes,
+        limit=sourcing_limit,
+        min_score=args.min_score,
+        min_fleet=args.min_fleet,
+        seen_dots=seen_dots,
+        dry_run=args.dry_run,
+        cluster_name=f"{state}_STATE",
+        min_bipd=RULES.liability_min,
+    )
+
+    logger.info("State sourcing done: %d qualified before bucket split", len(qualified))
+
+    # Partition into buckets
+    bucket_entries: dict[str, list[dict]] = {b: [] for b in buckets}
+    for c in qualified:
+        for bucket in _bucket_flags_for_carrier(c, buckets):
+            bucket_entries[bucket].append(c)
+
+    stats: dict[str, Any] = {
+        "state": state,
+        "buckets_requested": buckets,
+        "zip_prefixes": list(zip_prefixes) if zip_prefixes else None,
+        "top_n": top_n,
+        "qualified_pre_split": len(qualified),
+        "bucket_counts": {b: len(v) for b, v in bucket_entries.items()},
+        "written_dots": [],
+        "insert_errors": [],
+        "dry_run": args.dry_run,
+    }
+
+    logger.info("Bucket counts pre-rank: %s", stats["bucket_counts"])
+
+    written_this_run: set[str] = set()
+
+    for bucket_name, entries in bucket_entries.items():
+        # Sort by score desc
+        entries.sort(key=lambda c: c.get("Carrier_Score", 0), reverse=True)
+        top = entries[:top_n]
+        logger.info("Bucket %s: writing top %d of %d", bucket_name, len(top), len(entries))
+
+        inserted_count = 0
+        for c in top:
+            if inserted_count >= top_n:
+                break
+            dot = str(c.get("DOT_Number", "") or "").strip()
+            if not dot or dot in written_this_run:
+                continue
+
+            # Tag preferred lane as STATE_BUCKET
+            c["_state_bucket"] = f"{state}_{bucket_name.upper()}"
+            cluster_tag = f"{state}_{bucket_name.upper()}"
+
+            try:
+                stored = enrich_and_store(c, cluster_tag, dry_run=args.dry_run)
+                written_this_run.add(dot)
+                stats["written_dots"].append(dot)
+                inserted_count += 1
+                logger.info(
+                    "Stored DOT %s (%s) → bucket %s",
+                    dot, c.get("Legal_Name"), bucket_name,
+                )
+            except Exception as exc:
+                stats["insert_errors"].append({
+                    "dot": dot, "name": c.get("Legal_Name"),
+                    "bucket": bucket_name, "error": str(exc),
+                })
+                logger.error("Store failed for DOT %s: %s", dot, exc)
+
+    stats["total_written"] = len(stats["written_dots"])
+    logger.info(
+        "State search complete — state=%s written=%d errors=%d",
+        state, stats["total_written"], len(stats["insert_errors"]),
+    )
+    return stats
 
 
 def main() -> None:
@@ -907,20 +1152,38 @@ def main() -> None:
             "Install the updated fmcsa.py to get full crash-rate and reefer checks."
         )
 
-    logger.info("Starting prospect carrier pipeline...")
-    logger.info("  Dry run:    %s", args.dry_run)
-    logger.info("  Cluster:    %s", args.cluster or "ALL")
-    logger.info("  Limit:      %d per target", args.limit)
-    logger.info("  Min score:  %d", args.min_score)
-    logger.info("  Min fleet:  %d", args.min_fleet)
-    logger.info("  Source:     %s", args.source)
-
-    stats = run_pipeline(args)
-
-    # Exit code: 0 if any carriers found, 1 if none
-    if stats["total_qualified"] == 0:
-        logger.warning("No carriers qualified — check search parameters or FMCSA API key.")
+    # Mutual exclusivity: --state and --cluster cannot be used together
+    if args.state and args.cluster:
+        logger.error("--state and --cluster are mutually exclusive. Pick one.")
         sys.exit(1)
+
+    if args.state:
+        # State mode — direct single-state search replacing deprecated per-state scripts
+        logger.info("Running in state mode: --state %s", args.state)
+        logger.info("  Buckets:    %s", args.buckets or "flatbed,dry_van,box_truck (default)")
+        logger.info("  ZIP prefix: %s", args.zip_prefixes or "ALL")
+        logger.info("  Limit:      %d per bucket", args.limit)
+        logger.info("  Dry run:    %s", args.dry_run)
+        stats = run_state_search(args)
+        if stats["total_written"] == 0 and not args.dry_run:
+            logger.warning("No carriers written — check state/bucket/sourcing parameters.")
+            sys.exit(1)
+    else:
+        # Cluster mode (original behavior)
+        logger.info("Starting prospect carrier pipeline (cluster mode)...")
+        logger.info("  Dry run:    %s", args.dry_run)
+        logger.info("  Cluster:    %s", args.cluster or "ALL")
+        logger.info("  Limit:      %d per target", args.limit)
+        logger.info("  Min score:  %d", args.min_score)
+        logger.info("  Min fleet:  %d", args.min_fleet)
+        logger.info("  Source:     %s", args.source)
+
+        stats = run_pipeline(args)
+
+        # Exit code: 0 if any carriers found, 1 if none
+        if stats["total_qualified"] == 0:
+            logger.warning("No carriers qualified — check search parameters or FMCSA API key.")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

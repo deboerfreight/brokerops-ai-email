@@ -48,6 +48,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Sequence
 
+from app.vetting.rules import RULES
+
 logger = logging.getLogger("brokerops.vetting.li_insurance")
 
 LI_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "fmcsa_li"
@@ -534,6 +536,84 @@ def build_sourcing_index(
     return len(rows_to_insert)
 
 
+# ── Private-fleet exclusion (name-pattern filter) ───────────────────────
+#
+# Private-fleet operators (asphalt plants, steel mills, construction GCs,
+# armored-car services, etc.) hold active common authority with BIPD ≥ $1M
+# and satisfy the L&I query filter, but they run their own trucks for their
+# own products and will never accept third-party loads. They pollute the
+# sourcing bucket and waste QCMobile quota on carriers that will never
+# respond to outreach. Filter them at the sourcing layer using a two-stage
+# rule:
+#
+#   1. legal_name contains a private-fleet token (substring, case-insensitive)
+#   2. AND legal_name does NOT contain a for-hire marker
+#      (TRUCKING / TRANSPORT / LOGISTICS / FREIGHT / EXPRESS / CARRIERS /
+#       HAULING / DISPATCH / DELIVERY)
+#
+# The for-hire-marker refinement protects edge cases like "PACIFIC LUMBER
+# TRANSPORT INC" — matches LUMBER but also matches TRANSPORT, so it's kept.
+#
+# Added 2026-04-14 in response to BUG 2 from TX flatbed sourcing run.
+
+# Substrings (already uppercase, already case-insensitive compared) that
+# signal a private-fleet operator when they appear in legal_name.
+_PRIVATE_FLEET_TOKENS: tuple[str, ...] = (
+    # Construction / paving / excavation
+    "PAVING", "PAVECON", "EXCAVATION", "EXCAVATING", "CONSTRUCTION",
+    "DEMOLITION", "CONCRETE CO", "CONCRETE LLC", "CONCRETE LP",
+    "BRIDGE AND ROAD", "BRIDGE & ROAD",
+    # Industrial / mfg / products
+    "INDUSTRIAL PRODUCTS", "MANUFACTURING", " MFG ", " MFG,",
+    "STEEL US", "STEEL INC", "STEEL LLC", "STEEL LP", "STEEL CORP",
+    "RIGGING", "CRATING",
+    # Fuel / oil / lubricant / propane
+    "FUEL", "PETROLEUM", "LUBRICANT", "PROPANE", " OIL CO",
+    # Building materials distributors
+    "LUMBER CO", "LUMBER LLC", "BUILDING SUPPLY", "BUILDING MATERIALS",
+    "BRICK", "ROOFING", "INSULATION", "AGGREGATE", "CEMENT",
+    # Food / dairy / beverage
+    "MILK", "DAIRY", "BAKERY", "CAKES INC", "BEVERAGE",
+    "ANIMAL SUPPLY", "VALLEY PROTEINS",
+    # Services (not freight for hire)
+    "CASH MANAGEMENT", "ARMORED", "BRINK",
+    "TOW", "WRECKER", "RECOVERY", "SALVAGE", "JUNK",
+    "WASTE", "REFUSE", "DISPOSAL", "RECYCLING", "SANITATION",
+    "LANDSCAPE",
+    # Passenger / bus / tours
+    "TROLLEY", "COACH", "TOURS", "CHARTER", "LIMO", "SHUTTLE",
+    "TRANSIT AUTHORITY",
+    # Moving / HHG
+    "MOVING", "STORAGE", "RELOCATION",
+    # Automotive / tire
+    "AUTO SALES", "TIRE RECYCL", "TIRE SERVICE",
+    # Chair / furniture / oddballs
+    "CHAIRS LLC", "CHAIRS INC", "FURNITURE",
+)
+
+# Tokens that keep a carrier in the bucket even if a private-fleet token
+# also matches. Substring match, case-insensitive.
+_FOR_HIRE_MARKERS: tuple[str, ...] = (
+    "TRUCKING", "TRANSPORT", "LOGISTICS", "FREIGHT", "EXPRESS",
+    "CARRIERS", "HAULING", "DISPATCH", "DELIVERY",
+)
+
+
+def _is_private_fleet_name(legal_name: str) -> bool:
+    """True if legal_name matches a private-fleet pattern AND lacks a
+    for-hire marker. See _PRIVATE_FLEET_TOKENS docstring above.
+    """
+    if not legal_name:
+        return False
+    name_upper = legal_name.upper()
+    # Two-stage rule: PF token present AND no for-hire marker present
+    if not any(tok in name_upper for tok in _PRIVATE_FLEET_TOKENS):
+        return False
+    if any(marker in name_upper for marker in _FOR_HIRE_MARKERS):
+        return False
+    return True
+
+
 # ── Sourcing query ───────────────────────────────────────────────────────
 
 
@@ -563,9 +643,10 @@ def _ensure_sourcing_index() -> None:
 def search_carriers_by_state(
     state: str,
     zip_prefixes: Optional[Sequence[str]] = None,
-    min_bipd: int = 1_000_000,
+    min_bipd: int = RULES.liability_min,
     exclude_broker_only: bool = True,
     require_active_authority: bool = True,
+    exclude_private_fleet_patterns: bool = True,
     limit: int = 100,
 ) -> list[SourcingCandidate]:
     """Query the L&I bulk data for carriers matching geographic + insurance criteria.
@@ -583,6 +664,10 @@ def search_carriers_by_state(
         Carriers with both motor and broker authority are kept.
       - require_active_authority: if True, require COMMON_STAT='A' OR
         CONTRACT_STAT='A' (at least one motor-carrier authority active).
+      - exclude_private_fleet_patterns: if True (default), drop legal_names
+        matching private-fleet tokens (construction, steel mills, armored,
+        waste, etc.) unless the name also carries a for-hire marker
+        (TRUCKING, TRANSPORT, LOGISTICS, etc.). See _PRIVATE_FLEET_TOKENS.
       - limit: max rows returned
 
     Ordering: by bus_zip5 ASC, then legal_name ASC. Deterministic so a
@@ -625,6 +710,12 @@ def search_carriers_by_state(
         if prefix_clauses:
             where.append("(" + " OR ".join(prefix_clauses) + ")")
 
+    # When the PF filter is active, fetch extra rows from SQL because the
+    # Python post-filter will drop some; we still want `limit` results out.
+    # A 3x overfetch is enough in practice (TX/FL flatbed buckets show ~20%
+    # PF rate at worst; 3x is a comfortable margin).
+    sql_limit = int(limit) * 3 if exclude_private_fleet_patterns else int(limit)
+
     sql = (
         "SELECT dot, legal_name, dba_name, docket, bus_city, bus_state, "
         "bus_zip, bipd_filed, common_stat, contract_stat, broker_stat "
@@ -633,27 +724,35 @@ def search_carriers_by_state(
         "ORDER BY bus_zip5 ASC, legal_name ASC "
         "LIMIT ?"
     )
-    params.append(int(limit))
+    params.append(sql_limit)
 
     with closing(sqlite3.connect(LI_DB_PATH)) as conn:
         rows = conn.execute(sql, params).fetchall()
 
-    return [
-        SourcingCandidate(
-            dot=row[0],
-            legal_name=row[1],
-            dba_name=row[2],
-            docket=row[3],
-            bus_city=row[4],
-            bus_state=row[5],
-            bus_zip=row[6],
-            bipd_filed=int(row[7]),
-            common_stat=row[8],
-            contract_stat=row[9],
-            broker_stat=row[10],
+    candidates: list[SourcingCandidate] = []
+    for row in rows:
+        legal_name = row[1]
+        if exclude_private_fleet_patterns and _is_private_fleet_name(legal_name):
+            continue
+        candidates.append(
+            SourcingCandidate(
+                dot=row[0],
+                legal_name=legal_name,
+                dba_name=row[2],
+                docket=row[3],
+                bus_city=row[4],
+                bus_state=row[5],
+                bus_zip=row[6],
+                bipd_filed=int(row[7]),
+                common_stat=row[8],
+                contract_stat=row[9],
+                broker_stat=row[10],
+            )
         )
-        for row in rows
-    ]
+        if len(candidates) >= limit:
+            break
+
+    return candidates
 
 
 # ── Public lookup ────────────────────────────────────────────────────────

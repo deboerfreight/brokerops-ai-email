@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from app.config import get_settings
 from app.google_auth import get_sheets_service
+from app.vetting.rules import RULES
 
 logger = logging.getLogger("brokerops.sheets")
 
@@ -190,7 +191,7 @@ def get_loads_by_status(status: str) -> list[dict[str, str]]:
 # ── Carrier_Master ───────────────────────────────────────────────────────────
 
 CARRIER_DB_TAB = "'Carrier Database'"
-CARRIER_DB_RANGE = f"{CARRIER_DB_TAB}!A:AE"
+CARRIER_DB_RANGE = f"{CARRIER_DB_TAB}!A:AI"  # extended to AI to include Website (col 34)
 
 # Actual sheet columns (BrokerOps - Carrier Database)
 CARRIER_MASTER_COLUMNS = [
@@ -204,7 +205,15 @@ CARRIER_MASTER_COLUMNS = [
     "Has GPS", "GPS Provider",
     "Compliance Status", "Last Compliance Check",
     "Score", "Outreach Status", "Onboarded Date", "Notes",
+    # AF and AG are written outside CARRIER_MASTER_COLUMNS in insert_carrier
+    # (Classification and Vetting Status).  AH = Service Type (added 2026-04-15
+    # by carrier_cleanup_execute_20260415.py).  AI = Website (added 2026-04-15).
 ]
+
+# Extra columns that sit beyond CARRIER_MASTER_COLUMNS in the live sheet.
+# They are NOT included in the insert_carrier row-build (handled separately)
+# but ARE read back and written by update_carrier_field* helpers.
+_EXTRA_SHEET_COLUMNS = ["Classification", "Vetting Status", "Service Type", "Website"]
 
 # Map internal field names (used by fmcsa.py, carrier_search.py) to sheet columns
 _FIELD_MAP = {
@@ -215,7 +224,7 @@ _FIELD_MAP = {
     "Primary_Email": "Contact Email",
     "Contact_Email_Source": "Notes",  # append to notes
     "Primary_Phone": "Contact Phone",
-    "Website": "Notes",  # append to notes
+    "Website": "Website",  # dedicated Website column (col AI, added 2026-04-15)
     "Equipment_Type": "Equipment Types",
     "Preferred_Lanes": "Notes",  # append to notes
     "Insurance_Expiration": "Insurance Expiry",
@@ -266,6 +275,7 @@ _READ_ALIAS_MAP = {
     "Safety Rating": "Safety_Rating",
     "Notes": "Internal_Notes",
     "Vetting Status": "Vetting_Status",
+    "Website": "website",
 }
 
 
@@ -301,7 +311,7 @@ def _map_fields_to_sheet(fields: dict[str, Any]) -> dict[str, Any]:
         if sheet_col == "Notes" and k != "Internal_Notes":
             if v:
                 notes_parts.append(f"{k}: {v}")
-        elif sheet_col in CARRIER_MASTER_COLUMNS:
+        elif sheet_col in CARRIER_MASTER_COLUMNS or sheet_col in _EXTRA_SHEET_COLUMNS:
             mapped[sheet_col] = v
     # Merge notes
     if notes_parts:
@@ -497,7 +507,6 @@ def search_carriers_in_sheet(
 
 def is_carrier_dispatch_eligible(carrier: dict[str, str]) -> bool:
     """Check full dispatch-eligibility rules."""
-    settings = get_settings()
     today_str = date.today().isoformat()
     try:
         ins_exp = carrier.get("Insurance_Expiration", "")
@@ -505,7 +514,7 @@ def is_carrier_dispatch_eligible(carrier: dict[str, str]) -> bool:
         cargo = int(float(carrier.get("Cargo_Coverage", "0") or "0"))
     except (ValueError, TypeError):
         return False
-    # Reject fleet size below the 3-truck minimum.
+    # Reject fleet size below the RULES.fleet_min minimum.
     # Carriers reading from sheets carry both header keys ("Fleet Size")
     # and python aliases ("Power_Units"). Try both.
     raw_units = (
@@ -517,14 +526,14 @@ def is_carrier_dispatch_eligible(carrier: dict[str, str]) -> bool:
         power_units = int(float(str(raw_units) or "0"))
     except (ValueError, TypeError):
         power_units = 0
-    if 0 < power_units < 3:
+    if 0 < power_units < RULES.fleet_min:
         return False
     return (
         carrier.get("Authority_Status") == "ACTIVE"
         and carrier.get("Compliance_Status") == "CLEAR"
         and ins_exp >= today_str
-        and auto_liab >= settings.MIN_AUTO_LIABILITY
-        and cargo >= settings.MIN_CARGO_COVERAGE
+        and auto_liab >= RULES.liability_min
+        and cargo >= RULES.cargo_min
         and carrier.get("W9_On_File", "").upper() in ("TRUE", "YES", "1")
         and carrier.get("Active", "").upper() in ("TRUE", "YES", "1")
     )
@@ -591,18 +600,35 @@ def _ensure_processed_tab():
 
 # ── Internal helper ──────────────────────────────────────────────────────────
 
+def _col_index_to_letter(idx: int) -> str:
+    """Convert 0-based column index to sheet column letter (A, B, ..., Z, AA, AB, ...)."""
+    result = ""
+    n = idx + 1  # 1-indexed
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        result = chr(65 + rem) + result
+    return result
+
+
 def _update_row_field(
     sheet_id: str, tab: str, columns: list[str],
     key_col: str, key_val: str, field: str, value: Any,
 ) -> None:
     """Find a row by key column value and update a specific field."""
-    rows = read_range(sheet_id, f"{tab}!A:AE")
+    # Read wide enough to cover all live columns including extras (AI = index 34)
+    rows = read_range(sheet_id, f"{tab}!A:AI")
     if not rows:
         return
     headers = rows[0]
+    if key_col not in headers:
+        logger.warning("_update_row_field: key column '%s' not found in headers", key_col)
+        return
+    if field not in headers:
+        logger.warning("_update_row_field: field '%s' not found in headers", field)
+        return
     key_idx = headers.index(key_col)
     field_idx = headers.index(field)
-    col_letter = chr(ord("A") + field_idx) if field_idx < 26 else f"A{chr(ord('A') + field_idx - 26)}"
+    col_letter = _col_index_to_letter(field_idx)
     for i, row in enumerate(rows[1:], start=2):
         padded = row + [""] * (len(headers) - len(row))
         if padded[key_idx] == key_val:

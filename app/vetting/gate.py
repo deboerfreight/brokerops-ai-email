@@ -261,12 +261,27 @@ def vet_complete(carrier: dict) -> VettingResult:
     equipment = _equipment(carrier)
     is_reefer = any("REEFER" in e for e in equipment)
     if is_reefer:
-        veh_oos_insp = _intish(carrier.get("Vehicle_OOS_Insp", 0))
-        if veh_oos_insp > 0:
+        # Rate-based rule (replaced 2026-04-15). Old rule rejected any
+        # vehicle OOS inspection which was impossible to clear for any fleet
+        # with real inspection history. New rule requires (a) enough
+        # inspections to trust the data and (b) OOS rate under the reefer-
+        # specific stricter threshold (~half the general-freight floor).
+        veh_insp = _intish(carrier.get("Vehicle_Insp", 0))
+        if veh_insp < RULES.reefer_min_inspection_count:
+            return VettingResult(
+                passed=False,
+                status=NEEDS_REVIEW,
+                reason=f"reefer carrier has only {veh_insp} vehicle inspection(s) — "
+                       f"below {RULES.reefer_min_inspection_count} minimum for OOS rate reliability",
+                checked_at=now,
+            )
+        veh_oos_rate = _floatish(carrier.get("Vehicle_OOS_Rate", 0))
+        if veh_oos_rate > RULES.reefer_vehicle_oos_max_pct:
             return VettingResult(
                 passed=False,
                 status=FAIL_REEFER,
-                reason=f"reefer carrier with {veh_oos_insp} vehicle OOS inspection(s) — zero tolerance",
+                reason=f"reefer carrier vehicle OOS rate {veh_oos_rate:.1f}% "
+                       f"exceeds reefer-specific {RULES.reefer_vehicle_oos_max_pct:.0f}% threshold",
                 checked_at=now,
             )
 

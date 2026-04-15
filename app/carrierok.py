@@ -11,6 +11,7 @@ import httpx
 
 from app.config import get_settings
 from app.google_auth import _get_secret
+from app.vetting.rules import RULES
 
 logger = logging.getLogger("brokerops.carrierok")
 
@@ -111,7 +112,7 @@ def derive_compliance_status(
         return "INSURANCE_NOT_FOUND"
     if exp_date < date.today():
         return "INSURANCE_EXPIRED"
-    if auto_liability < settings.MIN_AUTO_LIABILITY or cargo < settings.MIN_CARGO_COVERAGE:
+    if auto_liability < RULES.liability_min or cargo < RULES.cargo_min:
         return "PENDING_REVIEW"
     # W9 not required for compliance status itself (handled separately in dispatch eligibility)
     return "CLEAR"

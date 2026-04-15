@@ -44,6 +44,7 @@ from app.enrichment.playwright_fetcher import (
     _is_junk_email,
     extract_emails_from_html,
 )
+from app.fmcsa import _BASE_URL, _cached_get
 from app.google_auth import get_sheets_service
 from app.sheets import read_range
 
@@ -601,6 +602,266 @@ def run_enrichment(
         ],
     }
     return summary
+
+
+# ─── State Backfill ─────────────────────────────────────────────────────────
+# Why this exists: the original Playwright enrichment loop wrote Contact Email
+# and Notes but never backfilled City/State/ZIP for carriers that already had
+# those fields blank at load time. 42 pre-L&I carriers landed with blank State
+# after the 2026-04-14 enrichment pass. This function is the standalone fix.
+# See memory/feedback_carrier_category_rules.md for carrier classification rules
+# that govern which rows are safe to write.
+
+
+def _fetch_hq_raw(dot: str) -> Optional[dict]:
+    """Fetch raw /carriers/{dot} dict from FMCSA QCMobile. Returns carrier sub-dict or None."""
+    try:
+        data = _cached_get(f"{_BASE_URL}/{dot}")
+    except Exception as exc:
+        logger.warning("DOT %s: FMCSA fetch error: %s", dot, exc)
+        return None
+    content = data.get("content", data)
+    if isinstance(content, list):
+        content = content[0] if content else None
+    if not isinstance(content, dict):
+        return None
+    carrier = content.get("carrier", content)
+    if not isinstance(carrier, dict) or not carrier:
+        return None
+    return carrier
+
+
+def _load_quarantined_dots() -> set[str]:
+    """Return the set of DOT numbers currently in the Carrier Quarantine tab."""
+    from app.vetting.quarantine import QUARANTINE_TAB
+    sid = get_settings().CARRIER_MASTER_SHEET_ID
+    svc = get_sheets_service()
+    try:
+        resp = svc.spreadsheets().values().get(
+            spreadsheetId=sid,
+            range=f"'{QUARANTINE_TAB}'!A:E",
+        ).execute()
+    except Exception as exc:
+        logger.warning("Could not read Quarantine tab: %s — assuming empty", exc)
+        return set()
+    rows = resp.get("values", [])
+    if not rows:
+        return set()
+    header = rows[0]
+    try:
+        dot_idx = header.index("DOT Number")
+    except ValueError:
+        logger.warning("Quarantine tab has no 'DOT Number' header column")
+        return set()
+    quarantined: set[str] = set()
+    for r in rows[1:]:
+        if len(r) > dot_idx:
+            val = str(r[dot_idx]).strip()
+            if val:
+                quarantined.add(val)
+    logger.info("Quarantine tab: %d DOTs loaded (write-gate)", len(quarantined))
+    return quarantined
+
+
+def _load_blank_state_carriers() -> list[CarrierRecord]:
+    """Read main tab and return all rows (any classification) with blank State."""
+    sid = get_settings().CARRIER_MASTER_SHEET_ID
+    rows = read_range(sid, CARRIER_DB_RANGE_AF)
+    if not rows:
+        return []
+    headers = rows[0]
+    width = len(headers)
+    out: list[CarrierRecord] = []
+    for i, r in enumerate(rows[1:], start=2):
+        r = r + [""] * (width - len(r))
+        state = (r[COL_N_STATE] or "").strip()
+        if state:
+            continue  # already has a state — skip
+        dot = (r[4] or "").strip()
+        if not dot:
+            continue
+        out.append(CarrierRecord(
+            row_idx=i,
+            dot=dot,
+            mc=(r[3] or "").strip(),
+            name=(r[2] or "").strip(),
+            state=state,
+            city=(r[12] or "").strip(),
+            current_email=(r[COL_G_CONTACT_EMAIL] or "").strip(),
+            current_dispatch=(r[COL_J_DISPATCH_EMAIL] or "").strip(),
+            notes=(r[COL_AE_NOTES] or "").strip(),
+            classification=(r[COL_AF_CLASS] or "").strip(),
+        ))
+    return out
+
+
+def backfill_blank_states(
+    *,
+    dry_run: bool = False,
+    log_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    One-shot backfill of City/State/ZIP for main-tab carriers with blank State.
+
+    Algorithm:
+      1. Load all main-tab rows with blank State (any classification).
+      2. Load all quarantined DOTs — skip those to avoid resurrecting quarantined rows.
+      3. For each remaining DOT, call FMCSA /carriers/{dot} (1 req/sec).
+      4. Extract phyCity / phyState / phyZipcode.
+      5. Batch-write City, State, ZIP back in one batchUpdate call.
+
+    Returns a summary dict with per-DOT results.
+    """
+    started = datetime.now(timezone.utc)
+
+    # Set up file logging if requested
+    file_handler: Optional[logging.FileHandler] = None
+    if log_path:
+        os.makedirs(os.path.dirname(log_path) if os.path.dirname(log_path) else ".", exist_ok=True)
+        file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-5s | %(message)s"))
+        logging.getLogger("brokerops").addHandler(file_handler)
+        logger.info("State backfill log: %s", log_path)
+
+    try:
+        return _backfill_blank_states_inner(started, dry_run=dry_run)
+    finally:
+        if file_handler:
+            logging.getLogger("brokerops").removeHandler(file_handler)
+            file_handler.close()
+
+
+def _backfill_blank_states_inner(started: datetime, *, dry_run: bool) -> dict[str, Any]:
+    logger.info("=== STATE BACKFILL START (dry_run=%s) ===", dry_run)
+
+    blank_carriers = _load_blank_state_carriers()
+    logger.info("Main tab: %d rows with blank State", len(blank_carriers))
+
+    quarantined_dots = _load_quarantined_dots()
+
+    # Separate into actionable vs skipped-quarantined
+    to_process: list[CarrierRecord] = []
+    skipped_quarantined: list[str] = []
+    for c in blank_carriers:
+        if c.dot in quarantined_dots:
+            logger.info("DOT %s (%s): SKIP — in Quarantine tab", c.dot, c.name[:40])
+            skipped_quarantined.append(c.dot)
+        else:
+            to_process.append(c)
+
+    logger.info(
+        "%d to process, %d skipped (quarantined)",
+        len(to_process), len(skipped_quarantined),
+    )
+
+    # FMCSA calls — 1 req/sec
+    per_dot: list[dict[str, Any]] = []
+    # (row_idx, city, state, zip) tuples for the batch write
+    pending_writes: list[tuple[int, str, str, str]] = []
+
+    for idx, c in enumerate(to_process, start=1):
+        logger.info(
+            "[%d/%d] DOT %s  %s",
+            idx, len(to_process), c.dot, c.name[:50],
+        )
+        carrier_raw = _fetch_hq_raw(c.dot)
+
+        if carrier_raw is None:
+            logger.info("  → still blank (FMCSA returned no data)")
+            per_dot.append({
+                "dot": c.dot, "name": c.name,
+                "result": "still_blank", "reason": "fmcsa_no_data",
+                "city": "", "state": "", "zip": "",
+            })
+        else:
+            fm_city = (carrier_raw.get("phyCity") or "").strip()
+            fm_state = (carrier_raw.get("phyState") or "").strip()
+            fm_zip = str(carrier_raw.get("phyZipcode") or "").strip()
+
+            if fm_state:
+                logger.info(
+                    "  → filled: city=%s state=%s zip=%s",
+                    fm_city, fm_state, fm_zip,
+                )
+                per_dot.append({
+                    "dot": c.dot, "name": c.name,
+                    "result": "filled",
+                    "city": fm_city, "state": fm_state, "zip": fm_zip,
+                })
+                pending_writes.append((c.row_idx, fm_city, fm_state, fm_zip))
+            else:
+                logger.info("  → still blank (FMCSA phyState is empty)")
+                per_dot.append({
+                    "dot": c.dot, "name": c.name,
+                    "result": "still_blank", "reason": "fmcsa_phy_state_empty",
+                    "city": fm_city, "state": "", "zip": fm_zip,
+                })
+
+        # Rate limit: 1 req/sec
+        time.sleep(1.0)
+
+    # Batch write
+    writes_committed = 0
+    if not dry_run and pending_writes:
+        writes_committed = _batch_write_geo(pending_writes)
+    elif dry_run:
+        logger.info("DRY RUN — %d writes suppressed", len(pending_writes))
+
+    ended = datetime.now(timezone.utc)
+    n_filled = sum(1 for d in per_dot if d["result"] == "filled")
+    n_still_blank = sum(1 for d in per_dot if d["result"] == "still_blank")
+
+    logger.info(
+        "=== STATE BACKFILL DONE: attempted=%d filled=%d still_blank=%d skipped_quarantined=%d "
+        "writes_committed=%d elapsed=%.1fs ===",
+        len(to_process), n_filled, n_still_blank,
+        len(skipped_quarantined), writes_committed,
+        (ended - started).total_seconds(),
+    )
+
+    return {
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "elapsed_s": (ended - started).total_seconds(),
+        "blank_state_rows_found": len(blank_carriers),
+        "dots_attempted": len(to_process),
+        "dots_filled": n_filled,
+        "dots_still_blank": n_still_blank,
+        "dots_skipped_quarantined": len(skipped_quarantined),
+        "writes_committed": writes_committed,
+        "dry_run": dry_run,
+        "per_dot": per_dot,
+        "skipped_quarantined_dots": skipped_quarantined,
+    }
+
+
+def _batch_write_geo(writes: list[tuple[int, str, str, str]]) -> int:
+    """Write City (col M), State (col N), ZIP (col O) in one batchUpdate.
+
+    Only writes cells where the FMCSA value is non-empty.
+    Never touches any other column.
+    """
+    if not writes:
+        return 0
+    sid = get_settings().CARRIER_MASTER_SHEET_ID
+    svc = get_sheets_service().spreadsheets()
+    data = []
+    for row_idx, city, state, zip_code in writes:
+        if city:
+            data.append({"range": f"{CARRIER_DB_TAB}!M{row_idx}", "values": [[city]]})
+        if state:
+            data.append({"range": f"{CARRIER_DB_TAB}!N{row_idx}", "values": [[state]]})
+        if zip_code:
+            data.append({"range": f"{CARRIER_DB_TAB}!O{row_idx}", "values": [[zip_code]]})
+    if not data:
+        return 0
+    body = {"valueInputOption": "USER_ENTERED", "data": data}
+    svc.values().batchUpdate(spreadsheetId=sid, body=body).execute()
+    logger.info(
+        "Geo batch write: %d carrier rows → %d cells updated",
+        len(writes), len(data),
+    )
+    return len(writes)
 
 
 def _batch_write_updates(updates: list[tuple[int, str, str]]) -> int:

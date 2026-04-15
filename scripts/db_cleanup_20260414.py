@@ -115,6 +115,16 @@ def classify(row):
     # Fleet size below the 3-truck minimum → not eligible for outreach or
     # matching regardless of carrier type. Downstream consumers that filter
     # on Classification=for_hire will now correctly skip these rows.
+    #
+    # NOTE: the hardcoded `3` here intentionally parallels (but does not
+    # replace) the canonical vetting gate in app/vetting/rules.py::RULES.
+    # `classify()` is a COARSE taxonomy classifier that buckets rows into
+    # for_hire / private_fleet / passenger / fleet_too_small — it runs once
+    # per DB cleanup pass and does not drive live dispatch decisions. The
+    # canonical fleet-size gate lives in RULES.fleet_min and is read by
+    # app/vetting/gate.py, app/fmcsa.py, app/sheets.py, and every other
+    # active consumer. If RULES.fleet_min is ever raised, update this line
+    # to match — it is a manual sync point, not a silent dependency.
     if 0 < fleet_size < 3:
         return 'fleet_too_small'
 

@@ -169,18 +169,27 @@ def test_vet_complete_fail_crash_rate():
     assert r.status == FAIL_CRASH
 
 
-def test_vet_complete_fail_reefer_with_oos_inspection():
+def test_vet_complete_fail_reefer_over_rate_threshold():
+    """Rule revised 2026-04-15: binary 'any OOS = reject' replaced with
+    rate-based rule. Reefer at 15% vehicle OOS rate (above 10% threshold)
+    should now reject with fail_reefer_maintenance."""
     c = _clean()
     c["Equipment_Types"] = "REEFER,DRY_VAN"
-    c["Vehicle_OOS_Insp"] = 1
+    c["Vehicle_Insp"] = 50   # enough inspections to trust the rate
+    c["Vehicle_OOS_Rate"] = 15.0
     r = vet_complete(c)
     assert r.status == FAIL_REEFER
 
 
-def test_vet_complete_reefer_with_no_oos_passes():
+def test_vet_complete_reefer_below_threshold_passes():
+    """Reefer at 8% OOS rate with 50 inspections passes under the new
+    rate-based rule. Under the old binary rule this would have been
+    rejected if any Vehicle_OOS_Insp was > 0."""
     c = _clean()
     c["Equipment_Types"] = "REEFER"
-    c["Vehicle_OOS_Insp"] = 0
+    c["Vehicle_Insp"] = 50
+    c["Vehicle_OOS_Rate"] = 8.0
+    c["Vehicle_OOS_Insp"] = 4   # 4 of 50 = 8% — under 10% reefer threshold
     r = vet_complete(c)
     assert r.status == PASS_BASIC
 
@@ -310,3 +319,58 @@ def test_rules_thresholds_locked():
     assert RULES.vehicle_oos_max_pct == 30.0
     assert RULES.driver_oos_max_pct == 15.0
     assert RULES.crash_rate_max_per_100 == 30.0
+    # Reefer-specific rules (revised 2026-04-15). See rules.py for rationale.
+    assert RULES.reefer_vehicle_oos_max_pct == 10.0
+    assert RULES.reefer_min_inspection_count == 10
+
+
+def _clean_reefer():
+    """Reefer carrier with clean stats — 50 inspections, 8% OOS rate (below
+    reefer 10% threshold). Expected to PASS under the new rate-based rule."""
+    return {
+        "Legal_Name": "Clean Reefer Co",
+        "Power_Units": 20, "Driver_Count": 25,
+        "Insurance_Liability": 1_000_000, "Insurance_Cargo": 100_000,
+        "Safety_Rating": "Satisfactory",
+        "Vehicle_OOS_Rate": 8.0, "Driver_OOS_Rate": 3.0,
+        "Crash_Rate_Per100": 1.0,
+        "Equipment_Types": "REEFER",
+        "Vehicle_Insp": 50, "Vehicle_OOS_Insp": 4,
+    }
+
+
+def test_reefer_passes_under_threshold_with_enough_inspections():
+    """New rate-based rule: reefer at 8% OOS and 50 inspections should pass.
+    Under the OLD binary rule this would have been rejected (any OOS > 0)."""
+    c = _clean_reefer()
+    r = vet_complete(c)
+    assert r.passed, f"expected pass, got {r.status}: {r.reason}"
+    assert r.status == "pass_basic"
+
+
+def test_reefer_rejected_over_threshold():
+    """Reefer at 15% OOS rate exceeds the 10% reefer-specific threshold."""
+    c = _clean_reefer()
+    c["Vehicle_OOS_Rate"] = 15.0
+    r = vet_complete(c)
+    assert not r.passed
+    assert r.status == "fail_reefer_maintenance"
+
+
+def test_reefer_needs_review_under_inspection_floor():
+    """Reefer with only 5 inspections is data-insufficient regardless of rate."""
+    c = _clean_reefer()
+    c["Vehicle_Insp"] = 5
+    r = vet_complete(c)
+    assert not r.passed
+    assert r.status == "needs_review"
+    assert "inspection" in r.reason.lower()
+
+
+def test_non_reefer_not_subject_to_reefer_rule():
+    """Dry van at 20% OOS should still pass (general-freight rule is 30%)."""
+    c = _clean_reefer()
+    c["Equipment_Types"] = "DRY_VAN"
+    c["Vehicle_OOS_Rate"] = 20.0
+    r = vet_complete(c)
+    assert r.passed, f"dry van at 20% OOS should pass, got {r.status}: {r.reason}"

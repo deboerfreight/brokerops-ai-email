@@ -16,7 +16,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from app.workflows.enrich_carriers_playwright import run_enrichment
+from app.workflows.enrich_carriers_playwright import run_enrichment, backfill_blank_states
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -50,10 +50,57 @@ def main() -> int:
     parser.add_argument("--log-json", type=str, default=None,
                         help="Write the summary dict to this path as JSON.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--backfill-states",
+        action="store_true",
+        help=(
+            "Run the one-shot City/State/ZIP backfill for main-tab carriers with "
+            "blank State. Skips carriers currently in the Quarantine tab. "
+            "Bypasses the full enrichment pass — use standalone for the Apr-15 "
+            "42-row fix. See memory/feedback_carrier_category_rules.md."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-log",
+        type=str,
+        default="scripts/logs/state_backfill_20260415.log",
+        help="Log file path for --backfill-states run.",
+    )
     args = parser.parse_args()
 
     _configure_logging(args.verbose)
 
+    # ── Backfill-states mode ─────────────────────────────────────────────────
+    if args.backfill_states:
+        summary = backfill_blank_states(
+            dry_run=args.dry_run,
+            log_path=args.backfill_log,
+        )
+        print("\n==== STATE BACKFILL SUMMARY ====")
+        print(f"  elapsed:                  {summary['elapsed_s']:.1f}s")
+        print(f"  blank-state rows found:   {summary['blank_state_rows_found']}")
+        print(f"  DOTs attempted:           {summary['dots_attempted']}")
+        print(f"  DOTs filled:              {summary['dots_filled']}")
+        print(f"  DOTs still blank:         {summary['dots_still_blank']}")
+        print(f"  DOTs skipped (quarantine):{summary['dots_skipped_quarantined']}")
+        print(f"  writes committed:         {summary['writes_committed']}")
+        print(f"  dry run:                  {summary['dry_run']}")
+        print()
+        for d in summary["per_dot"]:
+            tag = d["result"].upper()
+            reason = f" ({d.get('reason', '')})" if d.get("reason") else ""
+            geo = f"  {d['city']}, {d['state']} {d['zip']}" if d["result"] == "filled" else ""
+            print(f"  DOT {d['dot']:>8}  {d['name'][:40]:<40}  {tag}{reason}{geo}")
+        if summary["skipped_quarantined_dots"]:
+            print(f"\n  Quarantined (skipped): {', '.join(summary['skipped_quarantined_dots'])}")
+        if args.log_json:
+            os.makedirs(os.path.dirname(args.log_json) or ".", exist_ok=True)
+            with open(args.log_json, "w", encoding="utf-8") as fp:
+                json.dump(summary, fp, indent=2, default=str)
+            print(f"\n  summary JSON: {args.log_json}")
+        return 0
+
+    # ── Standard enrichment mode ─────────────────────────────────────────────
     if args.reset_checkpoint and os.path.exists(args.checkpoint):
         os.remove(args.checkpoint)
         logging.info("Deleted checkpoint %s", args.checkpoint)

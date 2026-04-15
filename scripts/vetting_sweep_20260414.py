@@ -1,4 +1,27 @@
 """
+Vetting sweep — 2026-04-14  [DEPRECATED 2026-04-14 PM]
+
+⚠️  DO NOT RUN THIS SCRIPT.
+
+This is the FIRST-generation vetting sweep, written before the vetting
+rebuild. It has an inline `vet()` function with HARDCODED thresholds
+($1M liability, $100K cargo, fleet<3) that DO NOT match the canonical
+source of truth in app/vetting/rules.py::RULES.
+
+The canonical sweep is now:
+
+    scripts/run_vetting_sweep.py
+
+which calls app.vetting.sweep.sweep_carrier_database — that path reads
+RULES directly, applies the full gate (including the new rate-based
+reefer rules shipped 2026-04-15), and is the only supported way to
+re-sweep the Carrier Database going forward.
+
+This file is kept only for historical reference / audit trail of the
+one-shot sweep run on 2026-04-14. It should never be re-executed.
+
+Original docstring follows:
+──────────────────────────────────────────────────────────────────
 Vetting sweep — 2026-04-14
 
 Applies hard-reject rules to every for_hire carrier in the DB and writes the
@@ -19,6 +42,11 @@ These are future work — flagged in Notes as "partial vet".
 
 Idempotent: running twice produces same result, writes only if current cell differs.
 """
+raise RuntimeError(
+    "scripts/vetting_sweep_20260414.py is DEPRECATED — use "
+    "scripts/run_vetting_sweep.py (app.vetting.sweep) instead. "
+    "See module docstring for details."
+)
 import sys, io, re
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
