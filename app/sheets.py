@@ -191,7 +191,13 @@ def get_loads_by_status(status: str) -> list[dict[str, str]]:
 # ── Carrier_Master ───────────────────────────────────────────────────────────
 
 CARRIER_DB_TAB = "'Carrier Database'"
-CARRIER_DB_RANGE = f"{CARRIER_DB_TAB}!A:AI"  # extended to AI to include Website (col 34)
+# Extended to AS to cover the 7 new outreach-tracking columns added 2026-04-15:
+# AJ = Outreach_Status, AK = Outreach_E1_SentAt, AL = Outreach_E2_SentAt,
+# AM = Outreach_E3_SentAt, AN = Outreach_Thread_Id,
+# AO = Onboarding_Status, AP = Onboarding_Docs_Received
+# AQ = Outreach_OOO_Return_Date (added 2026-04-15 amendment)
+# AR = Onboarding_E4_ScheduledFor (added 2026-04-15 amendment)
+CARRIER_DB_RANGE = f"{CARRIER_DB_TAB}!A:AR"
 
 # Actual sheet columns (BrokerOps - Carrier Database)
 CARRIER_MASTER_COLUMNS = [
@@ -213,7 +219,41 @@ CARRIER_MASTER_COLUMNS = [
 # Extra columns that sit beyond CARRIER_MASTER_COLUMNS in the live sheet.
 # They are NOT included in the insert_carrier row-build (handled separately)
 # but ARE read back and written by update_carrier_field* helpers.
-_EXTRA_SHEET_COLUMNS = ["Classification", "Vetting Status", "Service Type", "Website"]
+#
+# Column layout after CARRIER_MASTER_COLUMNS (A–AE = 31 cols):
+#   AF = Classification
+#   AG = Vetting Status
+#   AH = Service Type      (added 2026-04-15)
+#   AI = Website           (added 2026-04-15)
+#   AJ = Outreach_Status       (added 2026-04-15) enum: none/E1_SENT/E2_SENT/E3_SENT/
+#                                                         replied_interested/replied_not_interested/
+#                                                         bounced/redirected/ooo_paused/outreach_error
+#   AK = Outreach_E1_SentAt    (added 2026-04-15) ISO timestamp
+#   AL = Outreach_E2_SentAt    (added 2026-04-15) ISO timestamp
+#   AM = Outreach_E3_SentAt    (added 2026-04-15) ISO timestamp
+#   AN = Outreach_Thread_Id    (added 2026-04-15) Gmail thread ID
+#   AO = Onboarding_Status     (added 2026-04-15) enum: none/replied_interested/docs_requested/
+#                                                         docs_received_partial/docs_verified/
+#                                                         agreement_pending/onboarded/paused/rejected
+#   AP = Onboarding_Docs_Received (added 2026-04-15) comma-separated: W9,COI,AUTH,ACH
+#   AQ = Outreach_OOO_Return_Date (added 2026-04-15) ISO date; set on ooo / ooo_redirect
+#   AR = Onboarding_E4_ScheduledFor (added 2026-04-15) ISO timestamp; set when E4 is queued
+_EXTRA_SHEET_COLUMNS = [
+    "Classification",
+    "Vetting Status",
+    "Service Type",
+    "Website",
+    "Outreach_Status",
+    "Outreach_E1_SentAt",
+    "Outreach_E2_SentAt",
+    "Outreach_E3_SentAt",
+    "Outreach_Thread_Id",
+    "Onboarding_Status",
+    "Onboarding_Docs_Received",
+    "Outreach_OOO_Return_Date",
+    "Onboarding_E4_ScheduledFor",
+    "Onboarding_E4_SentAt",
+]
 
 # Map internal field names (used by fmcsa.py, carrier_search.py) to sheet columns
 _FIELD_MAP = {
@@ -225,6 +265,17 @@ _FIELD_MAP = {
     "Contact_Email_Source": "Notes",  # append to notes
     "Primary_Phone": "Contact Phone",
     "Website": "Website",  # dedicated Website column (col AI, added 2026-04-15)
+    # Outreach tracking columns (AJ–AP, added 2026-04-15)
+    "Outreach_Status": "Outreach_Status",
+    "Outreach_E1_SentAt": "Outreach_E1_SentAt",
+    "Outreach_E2_SentAt": "Outreach_E2_SentAt",
+    "Outreach_E3_SentAt": "Outreach_E3_SentAt",
+    "Outreach_Thread_Id": "Outreach_Thread_Id",
+    "Onboarding_Status": "Onboarding_Status",
+    "Onboarding_Docs_Received": "Onboarding_Docs_Received",
+    "Outreach_OOO_Return_Date": "Outreach_OOO_Return_Date",
+    "Onboarding_E4_ScheduledFor": "Onboarding_E4_ScheduledFor",
+    "Onboarding_E4_SentAt": "Onboarding_E4_SentAt",
     "Equipment_Type": "Equipment Types",
     "Preferred_Lanes": "Notes",  # append to notes
     "Insurance_Expiration": "Insurance Expiry",
@@ -276,6 +327,17 @@ _READ_ALIAS_MAP = {
     "Notes": "Internal_Notes",
     "Vetting Status": "Vetting_Status",
     "Website": "website",
+    # Outreach tracking read aliases (AJ–AP)
+    "Outreach_Status": "Outreach_Status",
+    "Outreach_E1_SentAt": "Outreach_E1_SentAt",
+    "Outreach_E2_SentAt": "Outreach_E2_SentAt",
+    "Outreach_E3_SentAt": "Outreach_E3_SentAt",
+    "Outreach_Thread_Id": "Outreach_Thread_Id",
+    "Onboarding_Status": "Onboarding_Status",
+    "Onboarding_Docs_Received": "Onboarding_Docs_Received",
+    "Outreach_OOO_Return_Date": "Outreach_OOO_Return_Date",
+    "Onboarding_E4_ScheduledFor": "Onboarding_E4_ScheduledFor",
+    "Onboarding_E4_SentAt": "Onboarding_E4_SentAt",
 }
 
 
@@ -615,8 +677,8 @@ def _update_row_field(
     key_col: str, key_val: str, field: str, value: Any,
 ) -> None:
     """Find a row by key column value and update a specific field."""
-    # Read wide enough to cover all live columns including extras (AI = index 34)
-    rows = read_range(sheet_id, f"{tab}!A:AI")
+    # Read wide enough to cover all live columns including outreach extras (AR = col 44)
+    rows = read_range(sheet_id, f"{tab}!A:AR")
     if not rows:
         return
     headers = rows[0]

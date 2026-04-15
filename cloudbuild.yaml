@@ -1,36 +1,31 @@
-# Cloud Build configuration for deploying to Cloud Run.
-# Usage: gcloud builds submit --config cloudbuild.yaml .
+# Cloud Build configuration — builds and pushes the brokerops-ai image to the
+# dedicated Artifact Registry repo at us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai.
+# Deploy is handled separately by scripts/deploy_cloud_run.sh so that vault
+# secrets can be injected at deploy time (not baked into the build).
+#
+# Usage: gcloud builds submit --config cloudbuild.yaml . --project=wide-decoder-489023-p1
 
 steps:
-  # Build the Docker image
+  # Build the Docker image with two tags: unique BUILD_ID + latest.
+  # --no-cache forces pip to re-resolve requirements.txt every build so
+  # version pins (e.g. google-auth==2.49.1) actually take effect.
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
+      - '--no-cache'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:$BUILD_ID'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:latest'
       - '.'
 
-  # Push to Container Registry
+  # Push both tags to the dedicated AR repo
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
-
-  # Deploy to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: 'gcloud'
-    args:
-      - 'run'
-      - 'deploy'
-      - 'brokerops-ai'
-      - '--image=gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
-      - '--region=us-central1'
-      - '--platform=managed'
-      - '--no-allow-unauthenticated'
-      - '--memory=512Mi'
-      - '--timeout=300'
-      - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID'
-      - '--service-account=brokerops-sa@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai'
 
 images:
-  - 'gcr.io/$PROJECT_ID/brokerops-ai:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:$BUILD_ID'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/brokerops-ai/brokerops-ai:latest'

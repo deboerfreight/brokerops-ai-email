@@ -222,7 +222,146 @@ Keys required for the carrier search flow:
 
 ---
 
-## 10. Known Open Items
+## 10. Remote operation (Cloud Run + Cloud Scheduler)
+
+**Status:** Scripts ready; pending Derek's domain-wide delegation and first deploy. (2026-04-15)
+
+### Architecture
+
+```
+Google Workspace Admin
+  └── Domain-wide delegation for brokerops-gmail SA
+          │
+          ▼
+Cloud Run: brokerops-ai  (us-central1, wide-decoder-489023-p1)
+  ├── Dockerfile: python:3.12-slim, non-root user, no test code
+  ├── Auth mode: GMAIL_AUTH_MODE=service_account → impersonates sales@deboerfreight.com
+  ├── Secrets: vault → deploy_cloud_run.sh --set-env-vars injection at deploy time
+  └── Routes:
+        GET  /health
+        GET  /healthz           ← Slack alert on degradation
+        POST /tasks/vetting-sweep
+        POST /tasks/poll-replies
+        POST /tasks/assemble-outreach-batch
+        POST /tasks/process-attachments
+        POST /tasks/mdl-vendor-dispatch
+        POST /tasks/daily-report
+          │
+Cloud Scheduler (7 jobs, us-central1, America/New_York)
+  ├── brokerops-vetting-sweep          cron: 0 4 * * *
+  ├── brokerops-poll-replies           cron: */5 * * * *
+  ├── brokerops-assemble-outreach-batch cron: 30 8 * * 1-5
+  ├── brokerops-process-attachments    cron: */15 * * * *
+  ├── brokerops-mdl-vendor-dispatch    cron: */5 * * * *
+  ├── brokerops-daily-report           cron: 0 18 * * 1-5
+  └── brokerops-health-check           cron: */5 * * * * (GET /healthz)
+```
+
+### Service account
+
+- SA email: `brokerops-gmail@wide-decoder-489023-p1.iam.gserviceaccount.com`
+- Purpose: headless Gmail/Drive access via domain-wide delegation
+- Auth: **Workload Identity** — SA attached as Cloud Run runtime identity; tokens minted
+  from the Cloud Run metadata server on demand. No key file exists. Nothing in the vault.
+  No rotation needed. (Pivot 2026-04-15: org policy blocks key creation.)
+- Impersonates: `sales@deboerfreight.com`
+
+### Auth mode switching
+
+`app/google_auth.py` supports two modes via `GMAIL_AUTH_MODE` env var:
+- `user` (default/local): OAuth2 token.json or Secret Manager refresh token
+- `service_account` (Cloud Run): SA delegation to `sales@deboerfreight.com`
+
+Set `GMAIL_AUTH_MODE=service_account` in the Cloud Run environment (injected by `deploy_cloud_run.sh`).
+
+### Secrets pipeline
+
+No GCP Secret Manager for new secrets. Flow:
+```
+org vault (org.db Fernet)
+    └── scripts/deploy_cloud_run.sh --set-env-vars ^@^KEY=VALUE@...
+            └── Cloud Run managed environment
+```
+Every secret rotation = redeploy via `deploy_cloud_run.sh --apply`.
+
+### Task route auth
+
+All `/tasks/*` routes require `X-Scheduler-Token` header matching `SCHEDULER_TOKEN` env var.
+Cloud Scheduler is the only caller. Returns 401 on mismatch, 500 if env var unset.
+
+### Slack observability
+
+`GET /healthz` checks Sheets API, Gmail API, and required env vars.
+On any degradation, posts a Slack alert via `notify_slack()` immediately.
+Cloud Scheduler hits `/healthz` every 5 min — degradation triggers Slack within 5 minutes.
+
+### Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/create_service_account.sh` | One-time SA creation + Workload Identity attachment (no key file — see pivot 2026-04-15) |
+| `scripts/deploy_cloud_run.sh` | Vault → env var injection → gcloud run deploy |
+| `scripts/setup_cloud_scheduler.sh` | Creates all 7 Cloud Scheduler jobs |
+
+All scripts are dry-run by default. Pass `--apply` to execute.
+
+### schtasks → Cloud Scheduler migration map
+
+| Windows schtask | Cloud Scheduler job | Status |
+|---|---|---|
+| `BrokerOps-Vetting-Daily-Sweep` | `brokerops-vetting-sweep` | Migrate |
+| `BrokerOps-MDL-Vendor-Dispatcher` | `brokerops-mdl-vendor-dispatch` | Migrate |
+| `BrokerOps-ProcessReplies` (disabled) | `brokerops-poll-replies` | Migrate |
+| `BrokerOps-FollowUp-RefrigeratedExpress` | — | Decommission (dead, points at deprecated TS repo) |
+
+### Deploy flow (first deploy)
+
+```bash
+# 1. Auth as project owner
+gcloud config set account sales@deboerfreight.com
+gcloud auth login   # browser opens once
+
+# 2. Create service account (one-time)
+./scripts/create_service_account.sh --apply
+
+# 3. Derek grants domain-wide delegation (one manual click in Google Workspace Admin)
+#    URL: https://admin.google.com/ac/owl/domainwidedelegation
+#    See: docs/cloud_run_audit_20260415.md Section 3 for exact scopes
+
+# 4. Build and push Docker image
+gcloud builds submit --config cloudbuild.yaml . --project=wide-decoder-489023-p1
+
+# 5. Deploy (secrets injected from vault)
+./scripts/deploy_cloud_run.sh --apply
+
+# 6. Create Cloud Scheduler jobs
+export SCHEDULER_TOKEN=<from vault>
+./scripts/setup_cloud_scheduler.sh --apply
+
+# 7. Smoke test
+gcloud scheduler jobs run brokerops-vetting-sweep --project=wide-decoder-489023-p1 --location=us-central1
+
+# 8. Watch logs
+gcloud logging read 'resource.type=cloud_run_revision' --project=wide-decoder-489023-p1 --limit=50
+
+# 9. Decommission Windows schtasks after verification
+powershell "Disable-ScheduledTask -TaskName 'BrokerOps-Vetting-Daily-Sweep'"
+powershell "Disable-ScheduledTask -TaskName 'BrokerOps-MDL-Vendor-Dispatcher'"
+powershell "Disable-ScheduledTask -TaskName 'BrokerOps-ProcessReplies'"
+powershell "Unregister-ScheduledTask -TaskName 'BrokerOps-FollowUp-RefrigeratedExpress' -Confirm:$false"
+```
+
+### Still laptop-bound after Phase 10
+
+- **Claude Code sessions** — orchestration (Sasha/Bolt/Lyra/Rex) runs on Derek's machine. Moving these to a hosted environment is a separate project.
+- **Playwright enrichment** — browser automation is not suitable for Cloud Run (no persistent binary). Runs manually on demand via `scripts/enrich_carriers_playwright.py` or a Cloud Run Job (not serverless).
+- **FMCSA L&I SQLite database** — `data/fmcsa_li/insurance_lookup.sqlite` (~160MB) lives on disk. If refreshed, needs to be baked into the Docker image or mounted via GCS FUSE. Current cadence is monthly; acceptable to rebuild image monthly.
+- **org vault (org.db)** — Fernet vault lives at `C:/Users/Owner/Desktop/Claude Work/team/org/org.db`. Vault reads happen at deploy time; the vault itself does not need to move.
+- **Manual carrier prospecting** — `scripts/prospect_carriers.py` is manual-only per protocol. Does not belong on a scheduler.
+
+---
+
+## 11. Known Open Items
 
 | Item | Status | Impact |
 |---|---|---|

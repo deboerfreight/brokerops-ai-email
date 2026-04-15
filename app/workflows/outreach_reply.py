@@ -150,27 +150,22 @@ def _build_sofia_followup(carrier: dict, analysis: dict) -> str:
 
     body = f"""{greeting}
 
-Thanks for the reply.
+Good to hear from you. To get you set up in our system, we need four things:
 
-To get you set up in our system, we will need the following documents:
+1. W-9 (signed)
+2. Certificate of Insurance showing auto liability >= $1,000,000 and cargo >= $100,000, with deBoer Freight listed as certificate holder
+3. Copy of your operating authority
+4. ACH / direct deposit info for payment
 
-1. W-9 Form (completed and signed)
-2. Certificate of Insurance (COI) showing:
-   - Auto Liability coverage of at least $1,000,000
-   - Cargo coverage of at least $100,000
-3. Copy of your Operating Authority letter
-4. ACH/direct deposit information for payment
+Reply with those as PDFs and we'll get you active.
 
-Please reply to this email with the documents attached as PDF files.
-
-We would also like to get your pricing for any lanes you run regularly. If you could share your rates for the routes and equipment types you cover, that will help us start matching you with available freight right away.
+If you want to share your rates on regular lanes while you're at it, that helps us start matching you to loads right away.
 
 Thanks,
 Sofia Reyes
-Carrier Relations
-{broker_company}
+Carrier Ops | deBoer Freight
 {broker_phone}
-"""
+sales@deboerfreight.com"""
     return body
 
 
@@ -192,18 +187,15 @@ def _build_sofia_decline_followup(carrier: dict, analysis: dict) -> str:
 
     body = f"""{greeting}
 
-Thank you for letting us know. We completely understand.
+Got it -- thanks for the reply.
 
-If things change, shoot us a note.
+If things change on your end, just shoot us a note. We're here.
 
-Could you share which lanes and areas you typically run? That way we can reach out when we have freight that fits your operation.
-
-Appreciate it,
+Thanks,
 Sofia Reyes
-Carrier Relations
-{broker_company}
+Carrier Ops | deBoer Freight
 {broker_phone}
-"""
+sales@deboerfreight.com"""
     return body
 
 

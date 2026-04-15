@@ -31,6 +31,22 @@ from app.google_auth import get_sheets_service
 
 logger = logging.getLogger("brokerops.workflows.mdl_vendor_outreach")
 
+# ── Tanker exclusion (2026-04-15) ──────────────────────────────────────────
+# MDL vendor data model has NO equipment column — vendors are building supply
+# distributors/manufacturers, not freight carriers. "TANKER" equipment bucket
+# exclusion does not apply here.
+#
+# However, a name-based check is applied as a safety net in case a petroleum
+# transport or chemical hauler was inadvertently added to the vendor sheet.
+# Uses the same patterns as BrokerOps EXCLUDED_SERVICE_TYPE_PATTERNS (tanker
+# subset only). Fuel/propane companies are NOT excluded here — they can be
+# valid building supply partners (see feedback_industrial_ag_focus.md).
+_MDL_TANKER_NAME_RE = re.compile(
+    r"\btanker\b|\btank\s+lines?\b|\bbulk\s+liquid\b"
+    r"|\bpetroleum\s+transport\b|\bchemical\s+transport\b",
+    re.IGNORECASE,
+)
+
 
 # ── Slack notifications ────────────────────────────────────────────────────
 # Wired to real webhook 2026-04-14. notify_slack() in app/notifications.py
@@ -261,6 +277,18 @@ def run(dry_run: bool = False) -> dict:
                 "range": f"{TAB_NAME}!H{row_num}:I{row_num}",
                 "values": [[f"ERROR: missing vendor_company", STATUS_SEND_FAILED]],
             })
+            continue
+
+        # Tanker name exclusion (2026-04-15): MDL sheet has no equipment column,
+        # but catch any petroleum-transport or chemical-hauler company that was
+        # mistakenly entered as a building supply vendor.
+        if _MDL_TANKER_NAME_RE.search(vendor):
+            logger.info(
+                "Row %d (%s): skipped — tanker/petroleum-transport name pattern "
+                "(tanker exclusion rule 2026-04-15)",
+                row_num, vendor,
+            )
+            stats["skipped_unchecked"] += 1
             continue
 
         if not _is_valid_email(email):

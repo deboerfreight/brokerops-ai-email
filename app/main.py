@@ -19,6 +19,7 @@ from fastapi.responses import RedirectResponse, JSONResponse
 
 from app.config import get_settings, Settings
 from app.google_auth import build_oauth_flow, exchange_code
+from app.task_routes import router as task_router
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 
@@ -36,6 +37,9 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# ── Scheduled task routes (Cloud Scheduler → Cloud Run) ──────────────────────
+app.include_router(task_router)
+
 
 def get_config() -> Settings:
     return get_settings()
@@ -46,6 +50,86 @@ def get_config() -> Settings:
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "brokerops-ai"}
+
+
+@app.get("/healthz")
+def healthz(config: Settings = Depends(get_config)):
+    """
+    Deep health check for Cloud Scheduler monitoring.
+    Checks: required env vars present, Sheets API reachable, Gmail API reachable.
+    Sends a Slack alert if any dependency is degraded.
+
+    Cloud Scheduler hits this every 5 minutes.  Three consecutive failures
+    trigger Cloud Scheduler's native error notification + a Slack ping from here.
+    """
+    import os
+    from app.notifications import notify_slack
+
+    checks: dict[str, Any] = {}
+    degraded: list[str] = []
+
+    # 1. Critical env vars present (not checking values, just presence)
+    required_env = [
+        "CARRIER_MASTER_SHEET_ID",
+        "LOAD_MASTER_SHEET_ID",
+        "SLACK_WEBHOOK_URL",
+        "BROKER_EMAIL",
+        "SCHEDULER_TOKEN",
+    ]
+    missing_env = [k for k in required_env if not os.environ.get(k)]
+    checks["env_vars"] = {"missing": missing_env, "ok": len(missing_env) == 0}
+    if missing_env:
+        degraded.append(f"missing env vars: {missing_env}")
+
+    # 2. Google Sheets API reachable
+    try:
+        from app.google_auth import get_sheets_service
+        svc = get_sheets_service()
+        # Lightweight call — just check we can auth and reach the API
+        svc.spreadsheets().get(
+            spreadsheetId=config.CARRIER_MASTER_SHEET_ID,
+            fields="spreadsheetId"
+        ).execute()
+        checks["sheets_api"] = {"ok": True}
+    except Exception as exc:
+        msg = f"Sheets API unreachable: {exc}"
+        logger.warning(msg)
+        checks["sheets_api"] = {"ok": False, "error": str(exc)}
+        degraded.append("sheets_api unreachable")
+
+    # 3. Gmail API reachable
+    try:
+        from app.google_auth import get_gmail_service
+        gsvc = get_gmail_service()
+        profile = gsvc.users().getProfile(userId="me").execute()
+        checks["gmail_api"] = {"ok": True, "account": profile.get("emailAddress")}
+    except Exception as exc:
+        msg = f"Gmail API unreachable: {exc}"
+        logger.warning(msg)
+        checks["gmail_api"] = {"ok": False, "error": str(exc)}
+        degraded.append("gmail_api unreachable")
+
+    overall_ok = len(degraded) == 0
+
+    # 4. Slack alert on degradation
+    if degraded:
+        alert = (
+            ":rotating_light: *BrokerOps healthz DEGRADED* — "
+            + ", ".join(degraded)
+            + " — investigate immediately"
+        )
+        notify_slack(alert)
+        logger.error("healthz degraded: %s", degraded)
+
+    status_code = 200 if overall_ok else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if overall_ok else "degraded",
+            "checks": checks,
+            "degraded": degraded,
+        },
+    )
 
 
 # ── OAuth flow ───────────────────────────────────────────────────────────────

@@ -19,6 +19,6 @@ client_secret*.json
 scripts/.checkpoints/
 scripts/logs/
 
-# FMCSA L&I bulk CSV snapshots + lookup DB (regeneratable)
-data/fmcsa_li/
+# FMCSA L&I bulk CSV snapshots + lookup DB (regeneratable) + any other local data artifacts
+data/
 brokerops.db
