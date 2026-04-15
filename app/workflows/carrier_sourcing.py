@@ -17,6 +17,7 @@ from app.gmail import send_email, add_label
 from app.sheets import (
     get_all_carriers, get_loads_by_status,
     update_load_fields, is_carrier_dispatch_eligible,
+    is_carrier_vetted,
 )
 
 logger = logging.getLogger("brokerops.workflows.carrier_sourcing")
@@ -119,11 +120,13 @@ def source_carriers_for_load(load: dict, offset: int = 0) -> int:
     lane_key = f"{load['Origin_State']}-{load['Destination_State']}"
     equip = load["Equipment_Type"]
 
-    # Filter eligible carriers
+    # Filter eligible carriers (must also have passed the vetting sweep —
+    # 3 hard rules: fleet>=3, liability>=$1M, cargo>=$100K).
     all_carriers = get_all_carriers()
     eligible = [
         c for c in all_carriers
         if c.get("Equipment_Type") == equip
+        and is_carrier_vetted(c)
         and is_carrier_dispatch_eligible(c)
     ]
 
@@ -131,6 +134,7 @@ def source_carriers_for_load(load: dict, offset: int = 0) -> int:
     onboarding_candidates = [
         c for c in all_carriers
         if c.get("Equipment_Type") == equip
+        and is_carrier_vetted(c)
         and c.get("Active", "").upper() in ("TRUE", "YES", "1")
         and c.get("Authority_Status") == "ACTIVE"
         and c.get("Compliance_Status") == "CLEAR"

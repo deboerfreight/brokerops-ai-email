@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # ── Google Sheets IDs ────────────────────────────────────────
     CARRIER_MASTER_SHEET_ID: str = ""
     LOAD_MASTER_SHEET_ID: str = ""
+    MDL_VENDOR_SHEET_ID: str = ""
 
     # ── Google Drive folder IDs ──────────────────────────────────
     BROKEROPS_ROOT_FOLDER_ID: str = ""
@@ -49,11 +50,31 @@ class Settings(BaseSettings):
     GOOGLE_CSE_API_KEY: str = ""
     GOOGLE_CSE_CX: str = ""
 
+    # ── Google Maps (Directions API for route mileage in quotes) ─
+    GOOGLE_MAPS_API_KEY: str = ""
+
+    # ── Slack notifications (replaces _notify_slack stub) ────────
+    # Webhook URL from https://api.slack.com/apps — posts to the
+    # channel configured in the Slack app. Blank = fall back to
+    # logger-only (the original stub behavior).
+    SLACK_WEBHOOK_URL: str = ""
+
     # ── Polling / behaviour ──────────────────────────────────────
     RFQ_BATCH_SIZE: int = 5
     RFQ_EXPANSION_DELAY_SECONDS: int = 7200   # 2 hours
     MIN_AUTO_LIABILITY: int = 1_000_000
     MIN_CARGO_COVERAGE: int = 100_000
+
+    # ── Auto-reply kill switch ───────────────────────────────────
+    # Master feature flag. When False, Sofia does not auto-reply to
+    # carrier outreach replies, and Nina does not auto-ack inbound
+    # shipper RFQs. Classification/logging still happens; sends are
+    # skipped. Set to True only when ready to re-enable autonomous
+    # email responses. Default: OFF. Flipped to False by Derek 2026-04-14
+    # as part of the vetting rebuild pause. Does NOT affect the MDL
+    # vendor first-touch (that path is gated by an explicit per-row
+    # checkbox, not this flag).
+    OUTREACH_AUTO_REPLY_ENABLED: bool = False
 
     # ── OAuth scopes required ────────────────────────────────────
     OAUTH_SCOPES: list[str] = [

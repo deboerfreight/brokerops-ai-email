@@ -25,6 +25,7 @@ from app.gmail import send_email, reply_to_thread, search_messages
 from app.sheets import (
     get_all_carriers,
     get_broker_settings,
+    is_carrier_vetted,
     update_carrier_fields_by_key,
 )
 
@@ -56,23 +57,56 @@ def _get_broker_info() -> dict:
     }
 
 
-def _carrier_display_name(carrier: dict) -> str:
-    """Return the best name to use when greeting a carrier."""
-    return carrier.get("DBA_Name") or carrier.get("Legal_Name", "Carrier")
+def _carrier_display_name(carrier: dict) -> Optional[str]:
+    """Return the best name to use when greeting a carrier, or None if unknown.
+
+    DBA_Name is typically proper case and used as-is. Legal_Name from FMCSA
+    comes back ALL CAPS, which produces shouted greetings — title-case it.
+    Returns None when no usable name exists so the template can degrade to
+    a plain "Hello," rather than "Hello Carrier,".
+    """
+    dba = (carrier.get("DBA_Name") or "").strip()
+    if dba:
+        return dba
+    legal = (carrier.get("Legal_Name") or "").strip()
+    if legal:
+        return legal.title()
+    return None
+
+
+def _greeting(name: Optional[str]) -> str:
+    """Render the greeting line, degrading to plain 'Hello,' when name is empty."""
+    if name:
+        return f"Hello {name},"
+    return "Hello,"
 
 
 def _carrier_region(carrier: dict) -> str:
-    """Best-effort region description from preferred lanes or notes."""
-    lanes = carrier.get("Preferred_Lanes", "").strip()
+    """Best-effort region description from preferred lanes or notes.
+
+    Returns an empty string when unknown — callers must omit the region
+    phrase entirely rather than fabricate one.
+    """
+    lanes = (carrier.get("Preferred_Lanes") or "").strip()
     if lanes:
         return lanes
-    return "South Florida"
+    return ""
 
 
 def _carrier_equipment(carrier: dict) -> str:
-    """Return equipment string, defaulting to a generic term."""
-    eq = carrier.get("Equipment_Type", "").strip()
-    return eq if eq else "dry van and refrigerated"
+    """Return equipment string, sanitized for natural reading.
+
+    Replaces underscores with spaces and lowercases. If the source is empty,
+    returns plain "freight" rather than fabricating a type list.
+    """
+    eq = (carrier.get("Equipment_Type") or "").strip()
+    if not eq:
+        return "freight"
+    parts = [t.replace("_", " ").strip().lower() for t in eq.split(",")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return "freight"
+    return ", ".join(parts)
 
 
 def build_initial_outreach(carrier: dict) -> tuple[str, str]:
@@ -81,12 +115,19 @@ def build_initial_outreach(carrier: dict) -> tuple[str, str]:
     name = _carrier_display_name(carrier)
     region = _carrier_region(carrier)
     equipment = _carrier_equipment(carrier)
+    greeting = _greeting(name)
+    _ = region  # region unused in the opener; follow-ups handle region-specific phrasing
 
-    subject = f"Freight opportunities \u2014 deBoer Freight (MC#{DEBOER_MC})"
+    subject = f"Freight opportunities - deBoer Freight (MC#{DEBOER_MC})"
 
-    body = f"""Hello {name},
+    opener = (
+        f"I'm Sofia at deBoer Freight (MC#{DEBOER_MC}). We move {equipment} "
+        f"out of South FL and are adding carriers."
+    )
 
-My name is Sofia Reyes and I work with deBoer Freight (MC#{DEBOER_MC}). We move {equipment} freight in the {region} area and we are looking for reliable carriers to partner with.
+    body = f"""{greeting}
+
+{opener}
 
 What we offer:
   - Consistent freight, not just one-off loads
@@ -111,10 +152,23 @@ def build_followup_1(carrier: dict) -> str:
     info = _get_broker_info()
     name = _carrier_display_name(carrier)
     region = _carrier_region(carrier)
+    greeting = _greeting(name)
 
-    return f"""Hello {name},
+    if region:
+        lede = (
+            f"I wanted to follow up on my earlier message. We have freight moving "
+            f"through the {region} area regularly and would like to make sure you "
+            f"are on our carrier list."
+        )
+    else:
+        lede = (
+            "I wanted to follow up on my earlier message. We have freight moving "
+            "regularly and would like to make sure you are on our carrier list."
+        )
 
-I wanted to follow up on my earlier message. We have freight moving through the {region} area regularly and would like to make sure you are on our carrier list.
+    return f"""{greeting}
+
+{lede}
 
 If you could reply with your preferred lanes and equipment types, we can start getting loads in front of you.
 
@@ -131,10 +185,24 @@ def build_followup_2(carrier: dict) -> str:
     info = _get_broker_info()
     name = _carrier_display_name(carrier)
     region = _carrier_region(carrier)
+    greeting = _greeting(name)
 
-    return f"""Hello {name},
+    if region:
+        closer = (
+            f"This is my last note on this thread. If you are ever looking for "
+            f"freight in the {region} area, we are here and ready to work together. "
+            f"Simply reply to this email any time and we will get you set up."
+        )
+    else:
+        closer = (
+            "This is my last note on this thread. If you are ever looking for "
+            "freight, we are here and ready to work together. Simply reply to "
+            "this email any time and we will get you set up."
+        )
 
-This is my last note on this thread. If you are ever looking for freight in the {region} area, we are here and ready to work together. Simply reply to this email any time and we will get you set up.
+    return f"""{greeting}
+
+{closer}
 
 Thank you,
 Sofia Reyes
@@ -211,6 +279,34 @@ def _find_outreach_thread(carrier_email: str) -> Optional[str]:
         return None
 
 
+def _has_any_prior_gmail_thread(carrier_email: str) -> bool:
+    """Dedup hardening: check whether ANY Gmail message has been exchanged
+    with this address (sent OR received, any label, any subject).
+
+    This catches the gap where a carrier sits in sheet status=NEW but we
+    already talked to them manually, via a prior import, or via a previous
+    outreach whose sheet update failed. Runs before every initial send.
+
+    Returns True iff Gmail has at least one message involving this address.
+    Any API failure returns False (fail-open to avoid silently blocking sends
+    on transient errors — the sheet-status check remains the primary gate).
+    """
+    if not carrier_email or "@" not in carrier_email:
+        return False
+    try:
+        from app.google_auth import get_gmail_service
+        svc = get_gmail_service()
+        query = f"(to:{carrier_email} OR from:{carrier_email})"
+        resp = svc.users().messages().list(
+            userId="me", q=query, maxResults=1,
+        ).execute()
+        return bool(resp.get("messages", []))
+    except Exception as e:
+        logger.warning("Gmail dedup thread check failed for %s: %s — allowing send",
+                       carrier_email, e)
+        return False
+
+
 def _verify_gmail_ready() -> bool:
     """Safeguard: verify the Gmail integration is functional before sending."""
     try:
@@ -285,7 +381,7 @@ def _send_followup(carrier: dict, followup_num: int) -> bool:
                         carrier_key, followup_num)
         return False
 
-    subject = f"Freight opportunities \u2014 deBoer Freight (MC#{DEBOER_MC})"
+    subject = f"Freight opportunities - deBoer Freight (MC#{DEBOER_MC})"
 
     if followup_num == 1:
         body = build_followup_1(carrier)
@@ -377,8 +473,16 @@ def run(
     followup_2 = []
     phone_only = []
 
+    vetting_skipped = 0
     for c in all_carriers:
         status = (c.get("Onboarding_Status") or "").strip().upper()
+
+        # Vetting gate: only carriers whose sheet-level Vetting Status is
+        # 'pass_basic' are eligible for any outreach action. This enforces
+        # the 3 hard-reject rules (fleet>=3, liability>=$1M, cargo>=$100K).
+        if not is_carrier_vetted(c):
+            vetting_skipped += 1
+            continue
 
         if _is_phone_only(c):
             if status == "NEW":
@@ -396,6 +500,13 @@ def run(
             followup_1.append(c)
         elif status == "FOLLOW_UP_2":
             followup_2.append(c)
+
+    if vetting_skipped:
+        logger.info(
+            "Vetting gate filtered %d carriers (Vetting Status != pass_basic)",
+            vetting_skipped,
+        )
+    stats["vetting_skipped"] = vetting_skipped
 
     # Log PHONE_ONLY carriers
     for c in phone_only:
@@ -419,6 +530,17 @@ def run(
 
         carrier_key = carrier.get("MC_Number") or carrier.get("DOT_Number", "?")
         email = carrier.get("Primary_Email", "")
+
+        # Gate 3 dedup hardening: if the sheet says NEW but Gmail already has
+        # a thread with this address (manual correspondence, prior import, or
+        # a failed-sheet-update send from an earlier run), skip. This is the
+        # second line of defense behind the status-based categorization.
+        if _has_any_prior_gmail_thread(email):
+            logger.info("SKIP initial outreach for %s (%s) — existing Gmail thread found",
+                         carrier_key, email)
+            stats.setdefault("skipped_existing_thread", 0)
+            stats["skipped_existing_thread"] += 1
+            continue
 
         if dry_run:
             logger.info("[DRY RUN] Would send initial outreach to %s (%s)",

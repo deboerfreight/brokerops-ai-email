@@ -88,13 +88,18 @@ def search_carriers(
     seen_dots: set[str] = set()
     all_carriers: list[dict] = []
     per_term = max(limit // 3, 10)
+    target_state = state.upper()
 
     for term in search_terms:
         if len(all_carriers) >= limit:
             break
 
         url = f"{_BASE_URL}/name/{term}"
-        params: dict[str, Any] = {"stateAbbrev": state.upper(), "size": str(per_term)}
+        # Note: the name-search endpoint returns STUB records (name, DOT,
+        # sometimes state). It does not reliably honor the `city` query
+        # param — city filtering must happen post-hydration in the caller
+        # against the detail-endpoint's phyCity field.
+        params: dict[str, Any] = {"stateAbbrev": target_state, "size": str(per_term)}
         if city:
             params["city"] = city.upper()
 
@@ -111,11 +116,19 @@ def search_carriers(
         for item in content:
             carrier_data = item.get("carrier", item)
             normalized = _normalize_carrier(carrier_data)
-            if normalized:
-                dot = normalized.get("DOT_Number", "")
-                if dot and dot not in seen_dots:
-                    seen_dots.add(dot)
-                    all_carriers.append(normalized)
+            if not normalized:
+                continue
+            dot = normalized.get("DOT_Number", "")
+            if not dot or dot in seen_dots:
+                continue
+            # Drop obvious out-of-state carriers if the stub carries a State.
+            # The hydration step in the caller will do a second, stricter
+            # state+city check using the /carriers/{dot} detail response.
+            stub_state = str(normalized.get("State", "") or "").upper().strip()
+            if stub_state and stub_state != target_state:
+                continue
+            seen_dots.add(dot)
+            all_carriers.append(normalized)
 
     logger.info(
         "FMCSA search: found %d carriers in %s %s (terms: %s)",
@@ -207,6 +220,26 @@ def get_carrier_details(dot_number: str) -> Optional[dict]:
                     normalized["Crash_Rate_Per100"] = 0.0
         except Exception as exc:
             logger.debug("BASICS fetch failed for DOT %s: %s", dot_number, exc)
+
+    # Overlay FMCSA L&I bulk-file insurance (QCMobile REST returns None for
+    # BIPD/cargo fields, so this is the authoritative source for insurance).
+    # Safe when the L&I DB doesn't exist yet — get_insurance returns None.
+    if normalized:
+        try:
+            from app.vetting.li_insurance_lookup import get_insurance
+            li = get_insurance(dot_number)
+            if li and li.bipd_liability > 0:
+                normalized["Insurance_Liability"] = li.bipd_liability
+            if li and li.cargo > 0 and not normalized.get("Insurance_Cargo"):
+                normalized["Insurance_Cargo"] = li.cargo
+            if li and li.insurer_name:
+                normalized["Insurance_Company"] = li.insurer_name
+            if li and li.effective_date:
+                normalized["Insurance_Effective_Date"] = li.effective_date
+            if li:
+                normalized["Insurance_Source"] = f"fmcsa_li_bulk:{li.file_date}"
+        except Exception as exc:
+            logger.debug("L&I overlay failed for DOT %s: %s", dot_number, exc)
 
     return normalized
 
@@ -309,9 +342,34 @@ def get_carrier_inspections(dot_number: str) -> Optional[dict]:
 
 
 def _normalize_carrier(raw: dict) -> Optional[dict]:
-    """Normalize FMCSA API response fields to our internal format."""
+    """Normalize FMCSA API response fields to our internal format.
+
+    Data-quality gate: rejects records where legal_name is blank, numeric-only,
+    or matches the DOT number itself. FMCSA name-search occasionally returns
+    stub rows where the legal_name field holds the DOT string — those are
+    unusable downstream (they'd land in the sheet as "182752162" in the
+    Company Name column).
+    """
     dot = str(raw.get("dotNumber", raw.get("dot_number", "")))
     if not dot:
+        return None
+
+    # Data-quality gate on legal name: reject blank, numeric-only, or DOT-equivalent
+    legal_name_raw = str(raw.get("legalName", raw.get("carrierName", "")) or "").strip()
+    dba_raw = str(raw.get("dbaName", "") or "").strip()
+    # Pick the best name candidate (DBA preferred if Legal is bad)
+    best_name = legal_name_raw or dba_raw
+    if not best_name:
+        logger.debug("Skipping DOT %s: blank legal_name and dba_name", dot)
+        return None
+    # Reject numeric-only names (DOT string masquerading as name)
+    stripped = best_name.replace(" ", "").replace("-", "")
+    if stripped.isdigit():
+        logger.debug("Skipping DOT %s: numeric-only legal_name %r", dot, best_name)
+        return None
+    # Reject legal_name that matches the DOT number
+    if stripped == dot:
+        logger.debug("Skipping DOT %s: legal_name equals DOT", dot)
         return None
 
     # Extract MC number from docket numbers if available
@@ -330,8 +388,11 @@ def _normalize_carrier(raw: dict) -> Optional[dict]:
     auth_date = raw.get("statusDate", raw.get("authGrantDate", ""))
 
     # Insurance
-    liability = _safe_int(raw.get("bipdInsuranceOnFile", raw.get("insuranceRequired", 0)))
-    cargo = _safe_int(raw.get("cargoInsuranceOnFile", 0))
+    # QCMobile REST returns insurance amounts in THOUSANDS of dollars
+    # (e.g. bipdInsuranceOnFile=1000 means $1,000,000). Downstream vetting
+    # compares against whole-dollar thresholds ($1M), so we normalize here.
+    liability = _safe_int(raw.get("bipdInsuranceOnFile", raw.get("insuranceRequired", 0))) * 1000
+    cargo = _safe_int(raw.get("cargoInsuranceOnFile", 0)) * 1000
 
     # Safety
     safety_rating = raw.get("safetyRating", raw.get("ratingCode", ""))
@@ -735,6 +796,26 @@ def vet_carrier_strict(
     if units > 0 and units < 3:
         reason = (
             f"REJECT: Fleet size {units} power units below 3 minimum"
+        )
+        logger.info("Strict vet REJECT %s: %s", name, reason)
+        return False, reason
+
+    # ── Liability insurance below $1M ────────────────────────────
+    # Mirrors score_carrier(): the >0 guard means missing/blank insurance
+    # data is not a hard reject here (treated as needs_review downstream).
+    liability = _safe_int(carrier.get("Insurance_Liability", 0))
+    if liability > 0 and liability < 1_000_000:
+        reason = (
+            f"REJECT: Liability ${liability:,} below $1M minimum"
+        )
+        logger.info("Strict vet REJECT %s: %s", name, reason)
+        return False, reason
+
+    # ── Cargo insurance below $100K ──────────────────────────────
+    cargo = _safe_int(carrier.get("Insurance_Cargo", 0))
+    if cargo > 0 and cargo < 100_000:
+        reason = (
+            f"REJECT: Cargo ${cargo:,} below $100K minimum"
         )
         logger.info("Strict vet REJECT %s: %s", name, reason)
         return False, reason

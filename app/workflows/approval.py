@@ -19,6 +19,7 @@ from app.gmail import (
 from app.sheets import (
     get_loads_by_status, get_load, get_carrier,
     update_load_fields, is_carrier_dispatch_eligible,
+    is_carrier_vetted,
     is_message_processed, mark_message_processed,
     get_broker_settings,
 )
@@ -101,7 +102,11 @@ def run_send_packets() -> list[str]:
         if not mc:
             continue
         carrier = get_carrier(mc)
-        if carrier and is_carrier_dispatch_eligible(carrier):
+        if (
+            carrier
+            and is_carrier_vetted(carrier)
+            and is_carrier_dispatch_eligible(carrier)
+        ):
             update_load_fields(load["Load_ID"], {
                 "Load_Status": "READY_FOR_APPROVAL",
                 "Last_Updated": date.today().isoformat(),
@@ -119,6 +124,16 @@ def run_send_packets() -> list[str]:
         carrier = get_carrier(mc)
         if not carrier:
             logger.warning("Carrier MC=%s not found for load %s", mc, load_id)
+            continue
+
+        # Vetting gate: refuse to emit a packet for any carrier whose sheet
+        # vetting status is not 'pass_basic'. This is the last line of
+        # defense before a packet hits the broker's inbox.
+        if not is_carrier_vetted(carrier):
+            logger.warning(
+                "Carrier MC=%s for load %s failed vetting gate (Vetting Status=%r) — skipping packet",
+                mc, load_id, carrier.get("Vetting_Status") or carrier.get("Vetting Status"),
+            )
             continue
 
         try:

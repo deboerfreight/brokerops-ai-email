@@ -230,7 +230,55 @@ _FIELD_MAP = {
     "Internal_Notes": "Notes",
     "Power_Units": "Fleet Size",
     "Safety_Rating": "Safety Rating",
+    # FMCSA-normalized insurance keys (from app/fmcsa.py::_normalize_carrier).
+    # Without these, passing carriers land in the main tab with blank
+    # Insurance Liability / Cargo columns.
+    "Insurance_Liability": "Insurance Liability",
+    "Insurance_Cargo": "Insurance Cargo",
 }
+
+# Inverse of _FIELD_MAP for the READ path. Every workflow module
+# (carrier_outreach.py, outreach_reply.py, compliance_sync.py, etc.) reads
+# carrier dicts using underscored python-style keys, but the raw rows come
+# back from Sheets keyed by the human-readable headers. Without this alias
+# layer every workflow silently sees "" for every field and /jobs/poll no-ops.
+#
+# Option (a): post-process each row to carry BOTH keys. Kept over a wrapper
+# class because the dicts are tiny (<40 keys), every caller already uses
+# plain-dict .get() semantics, and we don't want to retype any workflow code.
+_READ_ALIAS_MAP = {
+    "MC Number": "MC_Number",
+    "DOT Number": "DOT_Number",
+    "Company Name": "Legal_Name",
+    "Contact Email": "Primary_Email",
+    "Contact Phone": "Primary_Phone",
+    "Equipment Types": "Equipment_Type",
+    "Insurance Expiry": "Insurance_Expiration",
+    "Insurance Liability": "Auto_Liability_Coverage",
+    "Insurance Cargo": "Cargo_Coverage",
+    "Authority Status": "Authority_Status",
+    "Authority Date": "Authority_Verified_Date",
+    "Compliance Status": "Compliance_Status",
+    "Status": "Active",
+    "Outreach Status": "Onboarding_Status",
+    "Score": "On_Time_Score",
+    "Fleet Size": "Power_Units",
+    "Safety Rating": "Safety_Rating",
+    "Notes": "Internal_Notes",
+    "Vetting Status": "Vetting_Status",
+}
+
+
+def _augment_with_aliases(row: dict[str, str]) -> dict[str, str]:
+    """Return a new dict carrying both the sheet-header key and its python alias.
+    Sheet-header keys are preserved (write path and any header-based callers
+    still work); python-style aliases are added so workflow .get() calls hit.
+    """
+    augmented = dict(row)
+    for header, alias in _READ_ALIAS_MAP.items():
+        if header in augmented and alias not in augmented:
+            augmented[alias] = augmented[header]
+    return augmented
 
 
 def _map_fields_to_sheet(fields: dict[str, Any]) -> dict[str, Any]:
@@ -277,7 +325,7 @@ def get_all_carriers() -> list[dict[str, str]]:
         return []
     headers = rows[0]
     return [
-        dict(zip(headers, r + [""] * (len(headers) - len(r))))
+        _augment_with_aliases(dict(zip(headers, r + [""] * (len(headers) - len(r)))))
         for r in rows[1:]
     ]
 
@@ -346,17 +394,77 @@ def update_carrier_fields_by_key(mc_number: str, dot_number: str, updates: dict[
 
 
 def insert_carrier(fields: dict[str, Any]) -> None:
-    """Append a new carrier row to Carrier Database."""
+    """Append a new carrier row to Carrier Database.
+
+    Pre-write hook: every insert is gated through `app.vetting.gate.vet_complete`.
+    Carriers that fail any hard-reject rule are routed to `Carrier Quarantine`
+    instead of the main tab.
+    """
+    # Lazy import to avoid circular dependency at module load.
+    from app.vetting.gate import vet_complete, PASS_BASIC
+    from app.vetting.quarantine import append_to_quarantine
+
     mapped = _map_fields_to_sheet(fields)
-    # Generate Carrier ID from DOT number
     dot = fields.get("DOT_Number", "") or fields.get("DOT Number", "")
     if not mapped.get("Carrier ID") and dot:
         mapped["Carrier ID"] = f"DOT-{dot}"
     if not mapped.get("Status"):
         mapped["Status"] = "prospect"
+
+    # Run the gate BEFORE writing. Hand vet_complete a dict that carries both
+    # the FMCSA-shaped keys (from `fields`) and the sheet-header keys (from
+    # `mapped`) so it can find Power_Units / Insurance_Liability / Insurance_Cargo
+    # under either spelling.
+    gate_input = dict(fields)
+    for k, v in mapped.items():
+        gate_input.setdefault(k, v)
+    result = vet_complete(gate_input)
+
+    if result.status != PASS_BASIC:
+        # Build a quarantine row dict that uses the sheet-header keys so
+        # `append_to_quarantine` can populate every column.
+        quarantine_row = dict(mapped)
+        quarantine_row["DOT Number"] = quarantine_row.get("DOT Number") or dot
+        quarantine_row["Vetting Status"] = result.status
+        try:
+            # NOTE: app/vetting/quarantine.py expects the TOP-LEVEL sheets
+            # service (it calls .spreadsheets() internally). _svc() returns
+            # the already-spreadsheets subresource, which would double-invoke
+            # and crash. Use get_sheets_service() directly here.
+            append_to_quarantine(
+                get_sheets_service(),
+                get_settings().CARRIER_MASTER_SHEET_ID,
+                quarantine_row,
+                result,
+            )
+        except Exception as exc:
+            logger.error(
+                "insert_carrier: vet failed AND quarantine write failed for %s: %s",
+                mapped.get("Company Name", dot), exc,
+            )
+            raise
+        logger.warning(
+            "insert_carrier: %s rejected by vetting (%s — %s); routed to quarantine",
+            mapped.get("Company Name", dot), result.status, result.reason,
+        )
+        return
+
+    # Stamp the new vetting status onto the row so col AG is correct on insert.
+    mapped["Vetting Status"] = result.status
     row = [str(mapped.get(c, "")) for c in CARRIER_MASTER_COLUMNS]
-    append_row(get_settings().CARRIER_MASTER_SHEET_ID, f"{CARRIER_DB_RANGE}", row)
-    logger.info("Inserted carrier %s into Carrier Database", mapped.get("Company Name", dot))
+    # CARRIER_MASTER_COLUMNS only covers A–AE. Pad with classification (AF, blank
+    # for new prospects — Derek's taxonomy) and the vetting status (AG).
+    row.append("")  # AF Classification
+    row.append(result.status)  # AG Vetting Status
+    append_row(
+        get_settings().CARRIER_MASTER_SHEET_ID,
+        f"{CARRIER_DB_TAB}!A:AG",
+        row,
+    )
+    logger.info(
+        "Inserted carrier %s into Carrier Database (vetting=%s)",
+        mapped.get("Company Name", dot), result.status,
+    )
 
 
 def search_carriers_in_sheet(
@@ -397,6 +505,20 @@ def is_carrier_dispatch_eligible(carrier: dict[str, str]) -> bool:
         cargo = int(float(carrier.get("Cargo_Coverage", "0") or "0"))
     except (ValueError, TypeError):
         return False
+    # Reject fleet size below the 3-truck minimum.
+    # Carriers reading from sheets carry both header keys ("Fleet Size")
+    # and python aliases ("Power_Units"). Try both.
+    raw_units = (
+        carrier.get("Power_Units")
+        or carrier.get("Fleet Size")
+        or "0"
+    )
+    try:
+        power_units = int(float(str(raw_units) or "0"))
+    except (ValueError, TypeError):
+        power_units = 0
+    if 0 < power_units < 3:
+        return False
     return (
         carrier.get("Authority_Status") == "ACTIVE"
         and carrier.get("Compliance_Status") == "CLEAR"
@@ -406,6 +528,12 @@ def is_carrier_dispatch_eligible(carrier: dict[str, str]) -> bool:
         and carrier.get("W9_On_File", "").upper() in ("TRUE", "YES", "1")
         and carrier.get("Active", "").upper() in ("TRUE", "YES", "1")
     )
+
+
+# `is_carrier_vetted` is the canonical sheet-level vetting gate. It now lives
+# in `app.vetting.gate` so the rules, sweep, and writer all share one source of
+# truth. Re-exported here to preserve every existing caller.
+from app.vetting.gate import is_carrier_vetted  # noqa: E402,F401
 
 
 # ── Processed-message idempotency store ──────────────────────────────────────

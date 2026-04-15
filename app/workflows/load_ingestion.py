@@ -218,55 +218,65 @@ def run() -> list[str]:
             for att in attachments:
                 upload_file(att["filename"], att["data"], att["mime_type"], load_folder_id)
 
-            # ── Sasha auto-replies ──
+            # ── Nina auto-replies (gated by OUTREACH_AUTO_REPLY_ENABLED) ──
+            auto_reply_enabled = get_settings().OUTREACH_AUTO_REPLY_ENABLED
             if missing_req:
 
-                # Sasha auto-reply: request missing info
-                reply_body = build_missing_fields_reply(missing_req, missing_pref, load_id)
-                try:
-                    reply_to_thread(
-                        thread_id=thread_id,
-                        to=from_addr,
-                        subject=subject,
-                        body_text=reply_body,
-                    )
-                    logger.info("[%s] Sasha sent missing-fields reply for %s", msg_id, load_id)
-                except Exception as reply_err:
-                    logger.error("[%s] Failed to send missing-fields reply: %s", msg_id, reply_err)
+                # Nina auto-reply: request missing info
+                if auto_reply_enabled:
+                    reply_body = build_missing_fields_reply(missing_req, missing_pref, load_id)
+                    try:
+                        reply_to_thread(
+                            thread_id=thread_id,
+                            to=from_addr,
+                            subject=subject,
+                            body_text=reply_body,
+                        )
+                        logger.info("[%s] Nina sent missing-fields reply for %s", msg_id, load_id)
+                    except Exception as reply_err:
+                        logger.error("[%s] Failed to send missing-fields reply: %s", msg_id, reply_err)
+                else:
+                    logger.info("[%s] AUTO-REPLY DISABLED: would have sent missing-fields reply for %s", msg_id, load_id)
 
                 # Label as BLOCKED until info arrives
                 add_label(msg_id, "OPS/BLOCKED")
 
             elif needs_verification:
                 # Load is complete but equipment needs verification – ask for packing slip
-                reply_body = build_verification_reply(
-                    load_id, equip_rec["verification_reasons"],
-                    equip_rec.get("recommended", ""),
-                )
-                try:
-                    reply_to_thread(
-                        thread_id=thread_id,
-                        to=from_addr,
-                        subject=subject,
-                        body_text=reply_body,
+                if auto_reply_enabled:
+                    reply_body = build_verification_reply(
+                        load_id, equip_rec["verification_reasons"],
+                        equip_rec.get("recommended", ""),
                     )
-                    logger.info("[%s] Sasha sent verification request for %s", msg_id, load_id)
-                except Exception as reply_err:
-                    logger.error("[%s] Failed to send verification reply: %s", msg_id, reply_err)
+                    try:
+                        reply_to_thread(
+                            thread_id=thread_id,
+                            to=from_addr,
+                            subject=subject,
+                            body_text=reply_body,
+                        )
+                        logger.info("[%s] Nina sent verification request for %s", msg_id, load_id)
+                    except Exception as reply_err:
+                        logger.error("[%s] Failed to send verification reply: %s", msg_id, reply_err)
+                else:
+                    logger.info("[%s] AUTO-REPLY DISABLED: would have sent verification reply for %s", msg_id, load_id)
 
             else:
                 # Load is complete – send confirmation
-                try:
-                    reply_body = build_confirmation_reply(load_id, fields)
-                    reply_to_thread(
-                        thread_id=thread_id,
-                        to=from_addr,
-                        subject=subject,
-                        body_text=reply_body,
-                    )
-                    logger.info("[%s] Sasha sent confirmation for %s", msg_id, load_id)
-                except Exception as reply_err:
-                    logger.error("[%s] Failed to send confirmation reply: %s", msg_id, reply_err)
+                if auto_reply_enabled:
+                    try:
+                        reply_body = build_confirmation_reply(load_id, fields)
+                        reply_to_thread(
+                            thread_id=thread_id,
+                            to=from_addr,
+                            subject=subject,
+                            body_text=reply_body,
+                        )
+                        logger.info("[%s] Nina sent confirmation for %s", msg_id, load_id)
+                    except Exception as reply_err:
+                        logger.error("[%s] Failed to send confirmation reply: %s", msg_id, reply_err)
+                else:
+                    logger.info("[%s] AUTO-REPLY DISABLED: would have sent confirmation for %s", msg_id, load_id)
 
             if missing_pref and not missing_req:
                 logger.info("[%s] Load %s missing preferred fields: %s (proceeding anyway)",

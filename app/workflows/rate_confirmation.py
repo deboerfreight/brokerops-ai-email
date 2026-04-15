@@ -120,11 +120,11 @@ def run() -> list[str]:
                 send_email(
                     to=carrier_email,
                     subject=f"Rate Confirmation | {load_id} | "
-                            f"{load['Origin_City']},{load['Origin_State']} → "
+                            f"{load['Origin_City']},{load['Origin_State']} to "
                             f"{load['Destination_City']},{load['Destination_State']}",
-                    body_text=f"Please find attached the rate confirmation for Load {load_id}.\n\n"
-                              f"Please review, sign, and return at your earliest convenience.\n\n"
-                              f"Thank you,\n{broker.get('Broker_Company_Name', 'BrokerOps')}",
+                    body_text=f"Rate con attached for Load {load_id}.\n\n"
+                              f"Sign and send it back when you can.\n\n"
+                              f"Thanks,\n- Sofia, deBoer Freight",
                     attachments=[{
                         "filename": pdf_filename,
                         "data": pdf_bytes,

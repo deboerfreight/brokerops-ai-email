@@ -2,10 +2,11 @@
 BrokerOps AI – Carrier email enrichment (4-step waterfall).
 
 Steps:
-  1. SAFER scrape   – parse FMCSA SAFER snapshot for contact email
-  2. Google CSE     – custom search (stubbed until keys configured)
-  3. Apollo.io      – org enrichment + people search
-  4. PHONE_ONLY     – fallback when no email found
+  1. SAFER scrape   – grab website URL from FMCSA (feeds into Apollo domain lookup)
+  2. Apollo.io      – org enrichment by domain + people search (primary email source)
+  3. Google CSE     – custom search fallback (stubbed until keys configured)
+  4. SAFER email    – low-quality fallback if Apollo + CSE miss
+  5. PHONE_ONLY     – last resort when no email found
 """
 from __future__ import annotations
 
@@ -45,17 +46,22 @@ def enrich_carrier_email(carrier: dict[str, Any]) -> dict[str, Any]:
 
     website: str | None = None
 
-    # Step 1 — SAFER scrape
-    result = _scrape_safer(dot)
-    if result:
-        if result.get("email"):
-            logger.info("SAFER hit for DOT %s: %s", dot, result["email"])
-            return {"email": result["email"], "source": "SAFER", "website": result.get("website")}
-        website = result.get("website")
+    # Step 1 — SAFER scrape (for website URL only — rarely has emails)
+    safer_result = _scrape_safer(dot)
+    if safer_result:
+        website = safer_result.get("website")
 
     time.sleep(0.5)
 
-    # Step 2 — Google CSE
+    # Step 2 — Apollo (primary source for contact emails)
+    apollo_result = _search_apollo(name, website)
+    if apollo_result:
+        logger.info("Apollo hit for %s: %s", name, apollo_result["email"])
+        return {"email": apollo_result["email"], "source": "APOLLO", "website": apollo_result.get("website") or website}
+
+    time.sleep(0.5)
+
+    # Step 3 — Google CSE
     cse_result = _search_google_cse(name, state)
     if cse_result:
         logger.info("Google CSE hit for %s: %s", name, cse_result["email"])
@@ -63,13 +69,12 @@ def enrich_carrier_email(carrier: dict[str, Any]) -> dict[str, Any]:
 
     time.sleep(0.5)
 
-    # Step 3 — Apollo
-    apollo_result = _search_apollo(name, website)
-    if apollo_result:
-        logger.info("Apollo hit for %s: %s", name, apollo_result["email"])
-        return {"email": apollo_result["email"], "source": "APOLLO", "website": apollo_result.get("website") or website}
+    # Step 4 — SAFER email fallback (low quality, but better than nothing)
+    if safer_result and safer_result.get("email"):
+        logger.info("SAFER email fallback for DOT %s: %s", dot, safer_result["email"])
+        return {"email": safer_result["email"], "source": "SAFER", "website": website}
 
-    # Step 4 — fallback
+    # Step 5 — PHONE_ONLY
     logger.info("No email found for %s — falling back to PHONE_ONLY", name)
     return {"email": None, "source": "PHONE_ONLY", "website": website}
 
@@ -103,10 +108,11 @@ def _scrape_safer(dot: str) -> dict[str, Any] | None:
 
     # Extract website (look for http links that aren't gov sites)
     website: str | None = None
+    _IGNORED_URL_KEYWORDS = {"fmcsa", "dot.gov", "safer", "usa.gov", "transportation.gov"}
     url_matches = re.findall(r'href=["\']?(https?://[^"\'>\s]+)', html, re.IGNORECASE)
     for url in url_matches:
         lower = url.lower()
-        if "fmcsa" not in lower and "dot.gov" not in lower and "safer" not in lower:
+        if not any(kw in lower for kw in _IGNORED_URL_KEYWORDS):
             website = url
             break
 
@@ -171,30 +177,30 @@ def _search_apollo(company_name: str, website: str | None) -> dict[str, Any] | N
     headers = {
         "Content-Type": "application/json",
         "Cache-Control": "no-cache",
+        "X-Api-Key": settings.APOLLO_API_KEY,
     }
-    api_key = settings.APOLLO_API_KEY
 
-    # 3a — Org enrichment (needs a domain)
+    # 3a — Org enrichment (needs a domain, requires paid tier)
     if website:
         domain = _extract_domain(website)
         if domain:
-            result = _apollo_org_enrich(domain, api_key, headers)
+            result = _apollo_org_enrich(domain, headers)
             if result:
                 return result
             time.sleep(0.3)
 
     # 3b — People search by company name
-    return _apollo_people_search(company_name, api_key, headers)
+    return _apollo_people_search(company_name, headers)
 
 
 def _apollo_org_enrich(
-    domain: str, api_key: str, headers: dict[str, str]
+    domain: str, headers: dict[str, str]
 ) -> dict[str, Any] | None:
     """Apollo organization enrichment by domain."""
     try:
         resp = httpx.get(
             _APOLLO_ORG_URL,
-            params={"api_key": api_key, "domain": domain},
+            params={"domain": domain},
             headers=headers,
             timeout=15,
         )
@@ -215,14 +221,13 @@ def _apollo_org_enrich(
 
 
 def _apollo_people_search(
-    company_name: str, api_key: str, headers: dict[str, str]
+    company_name: str, headers: dict[str, str]
 ) -> dict[str, Any] | None:
     """Apollo people search — find a contact at the company with an email."""
     if not company_name:
         return None
 
     payload = {
-        "api_key": api_key,
         "q_organization_name": company_name,
         "page": 1,
         "per_page": 5,

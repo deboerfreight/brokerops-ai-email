@@ -431,7 +431,7 @@ def build_missing_fields_reply(
     missing_preferred: list[str],
     load_id: str,
 ) -> str:
-    """Build an auto-reply in Sasha's voice – brief, direct, friendly."""
+    """Build an auto-reply in Nina's voice - brief, direct, friendly."""
 
     # Human-friendly field names
     friendly = {
@@ -450,7 +450,7 @@ def build_missing_fields_reply(
         "Delivery_Date": "delivery date",
     }
 
-    lines = [f"Hey! Sasha here from deBoer Freight. Got your load ({load_id}) in the system.\n"]
+    lines = [f"Hey, Nina here from deBoer Freight. Got your load ({load_id}) in the system.\n"]
 
     if missing_required:
         lines.append("Need a few things before I can get trucks rolling:\n")
@@ -465,7 +465,7 @@ def build_missing_fields_reply(
         lines.append("")
 
     lines.append("Just reply here with the details and I'll get this moving.\n")
-    lines.append("– Sasha, Sales Associate @ deBoer Freight")
+    lines.append("- Nina Weston, deBoer Freight")
 
     return "\n".join(lines)
 
@@ -475,9 +475,9 @@ def build_verification_reply(
     verification_reasons: list[str],
     equipment_rec: str,
 ) -> str:
-    """Build a Sasha-voice reply requesting packing slip / verification."""
+    """Build a Nina-voice reply requesting packing slip / verification."""
 
-    lines = [f"Hey! Sasha here from deBoer Freight – your load ({load_id}) is in the system.\n"]
+    lines = [f"Hey, Nina here from deBoer Freight. Your load ({load_id}) is in the system.\n"]
 
     lines.append(
         "I want to make sure we get the right trailer on this so there are no surprises. "
@@ -496,27 +496,28 @@ def build_verification_reply(
     )
 
     lines.append("Just reply here with the docs/details and I'll lock in the best option.\n")
-    lines.append("– Sasha, Sales Associate @ deBoer Freight")
+    lines.append("- Nina Weston, deBoer Freight")
 
     return "\n".join(lines)
 
 
 def build_confirmation_reply(load_id: str, fields: dict) -> str:
-    """Build a Sasha-voice confirmation when load is fully ingested."""
+    """Build a Nina-voice confirmation when load is fully ingested."""
 
     origin = f"{fields.get('Origin_City', '?')}, {fields.get('Origin_State', '?')}"
     dest = f"{fields.get('Destination_City', '?')}, {fields.get('Destination_State', '?')}"
     pickup = fields.get("Pickup_Date", "TBD")
     equip = fields.get("Equipment_Type", "TBD")
+    equip_display = equip.replace("_", " ").lower() if equip else "TBD"
     commodity = fields.get("Commodity", "freight")
 
     lines = [
-        f"Hey! Sasha here from deBoer Freight – got your load ({load_id}) locked in.\n",
+        f"Hey, Nina here from deBoer Freight. Got your load ({load_id}) locked in.\n",
         f"Quick summary:",
-        f"  {commodity} • {origin} → {dest}",
-        f"  Pickup: {pickup} • Trailer: {equip}\n",
+        f"  {commodity} from {origin} to {dest}",
+        f"  Pickup: {pickup} | Trailer: {equip_display}\n",
         "I'm sourcing carriers now. I'll reach out if anything comes up.\n",
-        "– Sasha, Sales Associate @ deBoer Freight",
+        "- Nina Weston, deBoer Freight",
     ]
 
     return "\n".join(lines)

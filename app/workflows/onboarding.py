@@ -54,8 +54,6 @@ we need the following documents on file:
 
 Please reply to this email with the documents attached as PDF files.
 
-If you have any questions, please don't hesitate to reach out.
-
 Thank you,
 {broker_name}
 {broker_phone}
